@@ -3,20 +3,26 @@ use ash::{
     version::{DeviceV1_0, DeviceV1_2, EntryV1_0, InstanceV1_0},
     vk,
 };
+use camera::{Camera, InputMap};
+use flink::{f32x4x4, vec3};
 use gpu_allocator::{AllocationCreateDesc, VulkanAllocator, VulkanAllocatorCreateDesc};
-use std::{fs::File, mem};
+use std::{fs::File, mem, path::Path};
 use winit::{
     dpi::LogicalSize,
-    event::{Event, WindowEvent},
+    event::{DeviceEvent, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
 
+mod camera;
 // mod ktx;
 
-const TRIANGLE: &[f32] = &[
-    0.0, 0.7, 1.0, 0.0, 0.0, 1.0, -0.7, -0.7, 0.0, 1.0, 0.0, 1.0, 0.7, -0.7, 0.0, 0.0, 1.0, 1.0,
-];
+#[repr(C)]
+#[derive(Debug)]
+struct LocalsPbr {
+    world_to_view: f32x4x4,
+    view_to_clip: f32x4x4,
+}
 
 /// View a slice as raw byte slice.
 ///
@@ -180,9 +186,14 @@ fn main() -> anyhow::Result<()> {
             debug_settings: Default::default(),
         });
 
-        let triangle_cpu = {
+        let directory = Path::new("assets");
+
+        let num_indices = 70_074;
+        let bin = std::fs::read(directory.join("SciFiHelmet.bin"))?;
+
+        let mesh_cpu = {
             let desc = vk::BufferCreateInfo::builder()
-                .size((TRIANGLE.len() * mem::size_of::<f32>()) as _)
+                .size(bin.len() as _)
                 .usage(vk::BufferUsageFlags::TRANSFER_SRC);
             let buffer = device.create_buffer(&desc, None)?;
             let alloc_desc = AllocationCreateDesc {
@@ -194,17 +205,18 @@ fn main() -> anyhow::Result<()> {
             let mut allocation = allocator.allocate(&alloc_desc)?;
             {
                 let mapping = allocation.mapped_slice_mut().unwrap();
-                mapping[..TRIANGLE.len() * mem::size_of::<f32>()]
-                    .copy_from_slice(as_u8_slice(TRIANGLE));
+                mapping[..bin.len()].copy_from_slice(as_u8_slice(&bin));
             }
             device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
             buffer
         };
 
-        let triangle_gpu = {
-            let desc = vk::BufferCreateInfo::builder()
-                .size((TRIANGLE.len() * mem::size_of::<f32>()) as _)
-                .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST);
+        let mesh_gpu = {
+            let desc = vk::BufferCreateInfo::builder().size(bin.len() as _).usage(
+                vk::BufferUsageFlags::VERTEX_BUFFER
+                    | vk::BufferUsageFlags::INDEX_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+            );
             let buffer = device.create_buffer(&desc, None)?;
             let alloc_desc = AllocationCreateDesc {
                 name: "Triangle Buffer (GPU)",
@@ -217,20 +229,36 @@ fn main() -> anyhow::Result<()> {
             buffer
         };
 
-        let triangle_vs = {
+        let locals_pbr_gpu = {
+            let desc = vk::BufferCreateInfo::builder()
+                .size(mem::size_of::<LocalsPbr>() as _)
+                .usage(vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST);
+            let buffer = device.create_buffer(&desc, None)?;
+            let alloc_desc = AllocationCreateDesc {
+                name: "Locals PBR (GPU)",
+                requirements: device.get_buffer_memory_requirements(buffer),
+                location: gpu_allocator::MemoryLocation::GpuOnly,
+                linear: true,
+            };
+            let allocation = allocator.allocate(&alloc_desc)?;
+            device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
+            buffer
+        };
+
+        let mesh_vs = {
             let mut file = File::open("assets/triangle.vert.spv")?;
             let code = ash::util::read_spv(&mut file)?;
             let desc = vk::ShaderModuleCreateInfo::builder().code(&code);
             device.create_shader_module(&desc, None)?
         };
-        let triangle_fs = {
+        let mesh_fs = {
             let mut file = File::open("assets/triangle.frag.spv")?;
             let code = ash::util::read_spv(&mut file)?;
             let desc = vk::ShaderModuleCreateInfo::builder().code(&code);
             device.create_shader_module(&desc, None)?
         };
 
-        let triangle_pass = {
+        let mesh_pass = {
             let attachments = [vk::AttachmentDescription {
                 format: surface_format.format,
                 samples: vk::SampleCountFlags::TYPE_1,
@@ -253,7 +281,7 @@ fn main() -> anyhow::Result<()> {
             device.create_render_pass(&desc, None)?
         };
 
-        let triangle_fbo = {
+        let mesh_fbo = {
             let image_formats = [surface_format.format];
             let images = [vk::FramebufferAttachmentImageInfo::builder()
                 .view_formats(&image_formats)
@@ -266,7 +294,7 @@ fn main() -> anyhow::Result<()> {
                 vk::FramebufferAttachmentsCreateInfo::builder().attachment_image_infos(&images);
             let mut desc = vk::FramebufferCreateInfo::builder()
                 .flags(vk::FramebufferCreateFlags::IMAGELESS)
-                .render_pass(triangle_pass)
+                .render_pass(mesh_pass)
                 .width(size.width as _)
                 .height(size.height as _)
                 .layers(1)
@@ -275,23 +303,67 @@ fn main() -> anyhow::Result<()> {
             device.create_framebuffer(&desc, None)?
         };
 
-        let triangle_layout = {
-            let desc = vk::PipelineLayoutCreateInfo::builder();
+        let mesh_set_layout = {
+            let bindings = [vk::DescriptorSetLayoutBinding::builder()
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .build()];
+            let desc = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
+            device.create_descriptor_set_layout(&desc, None)?
+        };
+
+        let mesh_layout = {
+            let set_layouts = [mesh_set_layout];
+            let desc = vk::PipelineLayoutCreateInfo::builder().set_layouts(&set_layouts);
             device.create_pipeline_layout(&desc, None)?
         };
 
-        let triangle_pipeline = {
+        let mesh_set = {
+            let pool_sizes = [vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 1,
+            }];
+            let desc = vk::DescriptorPoolCreateInfo::builder()
+                .max_sets(1)
+                .pool_sizes(&pool_sizes);
+            let pool = device.create_descriptor_pool(&desc, None)?;
+
+            let layouts = [mesh_set_layout];
+            let desc = vk::DescriptorSetAllocateInfo::builder()
+                .set_layouts(&layouts)
+                .descriptor_pool(pool);
+            let set = device.allocate_descriptor_sets(&desc)?;
+
+            let buffer_info = [vk::DescriptorBufferInfo {
+                buffer: locals_pbr_gpu,
+                offset: 0,
+                range: vk::WHOLE_SIZE,
+            }];
+            device.update_descriptor_sets(
+                &[vk::WriteDescriptorSet::builder()
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .dst_set(set[0])
+                    .buffer_info(&buffer_info)
+                    .build()],
+                &[],
+            );
+
+            set
+        };
+
+        let mesh_pipeline = {
             let entry_vs = std::ffi::CStr::from_bytes_with_nul(b"main\0")?;
             let entry_fs = std::ffi::CStr::from_bytes_with_nul(b"main\0")?;
             let stages = [
                 vk::PipelineShaderStageCreateInfo::builder()
                     .stage(vk::ShaderStageFlags::VERTEX)
-                    .module(triangle_vs)
+                    .module(mesh_vs)
                     .name(&entry_vs)
                     .build(),
                 vk::PipelineShaderStageCreateInfo::builder()
                     .stage(vk::ShaderStageFlags::FRAGMENT)
-                    .module(triangle_fs)
+                    .module(mesh_fs)
                     .name(&entry_fs)
                     .build(),
             ];
@@ -300,21 +372,50 @@ fn main() -> anyhow::Result<()> {
                 vk::VertexInputAttributeDescription {
                     location: 0,
                     binding: 0,
-                    format: vk::Format::R32G32_SFLOAT,
+                    format: vk::Format::R32G32B32_SFLOAT,
                     offset: 0,
                 },
                 vk::VertexInputAttributeDescription {
                     location: 1,
-                    binding: 0,
+                    binding: 1,
+                    format: vk::Format::R32G32B32_SFLOAT,
+                    offset: 0,
+                },
+                vk::VertexInputAttributeDescription {
+                    location: 2,
+                    binding: 2,
+                    format: vk::Format::R32G32_SFLOAT,
+                    offset: 0,
+                },
+                vk::VertexInputAttributeDescription {
+                    location: 3,
+                    binding: 3,
                     format: vk::Format::R32G32B32A32_SFLOAT,
-                    offset: 2 * 4, // R32G32_SFLOAT
+                    offset: 0,
                 },
             ];
-            let binding_desc = [vk::VertexInputBindingDescription {
-                binding: 0,
-                stride: 6 * 4, // R32G32_SFLOAT + R32G32B32A32_SFLOAT
-                input_rate: vk::VertexInputRate::VERTEX,
-            }];
+            let binding_desc = [
+                vk::VertexInputBindingDescription {
+                    binding: 0,
+                    stride: 3 * 4, // R32G32B32_SFLOAT
+                    input_rate: vk::VertexInputRate::VERTEX,
+                },
+                vk::VertexInputBindingDescription {
+                    binding: 1,
+                    stride: 3 * 4, // R32G32B32_SFLOAT
+                    input_rate: vk::VertexInputRate::VERTEX,
+                },
+                vk::VertexInputBindingDescription {
+                    binding: 2,
+                    stride: 2 * 4, // R32G32_SFLOAT
+                    input_rate: vk::VertexInputRate::VERTEX,
+                },
+                vk::VertexInputBindingDescription {
+                    binding: 3,
+                    stride: 4 * 4, // R32G32B32A32_SFLOAT
+                    input_rate: vk::VertexInputRate::VERTEX,
+                },
+            ];
             let vertex_input = vk::PipelineVertexInputStateCreateInfo::builder()
                 .vertex_attribute_descriptions(&attrib_desc)
                 .vertex_binding_descriptions(&binding_desc);
@@ -364,9 +465,9 @@ fn main() -> anyhow::Result<()> {
                 .color_blend_state(&color_blend_desc)
                 .depth_stencil_state(&depth_stencil_desc)
                 .dynamic_state(&dynamic_desc)
-                .render_pass(triangle_pass)
+                .render_pass(mesh_pass)
                 .subpass(0)
-                .layout(triangle_layout)
+                .layout(mesh_layout)
                 .build(); // TODO
 
             device
@@ -407,6 +508,9 @@ fn main() -> anyhow::Result<()> {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        let mut camera = Camera::new(vec3(0.0, 0.0, 0.0), 0.0, 0.0);
+        let mut input = InputMap::new();
+
         let mut frame_index = 0;
 
         event_loop.run(move |event, _, control_flow| {
@@ -421,7 +525,19 @@ fn main() -> anyhow::Result<()> {
                     swapchain_fn.destroy_swapchain(swapchain, None);
                     surface_fn.destroy_surface(surface, None);
                 }
+                Event::DeviceEvent { event, .. } => match event {
+                    DeviceEvent::MouseMotion { delta } => {
+                        input.update_mouse_motion((delta.0 as _, delta.1 as _));
+                    }
+                    DeviceEvent::Button { state, .. } => {
+                        input.update_mouse1(state);
+                    }
+                    _ => (),
+                },
                 Event::MainEventsCleared => {
+                    camera.update(&input);
+                    input.reset_delta();
+
                     let image_index = {
                         let mut index = 0;
                         let desc = vk::AcquireNextImageInfoKHR::builder()
@@ -471,15 +587,37 @@ fn main() -> anyhow::Result<()> {
                     if frame_index == 0 {
                         device.cmd_copy_buffer(
                             main_cmd_buffer,
-                            triangle_cpu,
-                            triangle_gpu,
+                            mesh_cpu,
+                            mesh_gpu,
                             &[vk::BufferCopy {
                                 src_offset: 0,
                                 dst_offset: 0,
-                                size: (TRIANGLE.len() * mem::size_of::<f32>()) as _,
+                                size: bin.len() as _,
                             }],
                         );
                     }
+
+                    let size = window.inner_size();
+                    let aspect = size.width as f32 / size.height as f32;
+
+                    let eye = camera.position() + camera.view_dir() * 4.5;
+                    let center = camera.position();
+
+                    let locals = LocalsPbr {
+                        world_to_view: f32x4x4::look_at_inv(eye, eye - center),
+                        view_to_clip: f32x4x4::perspective(
+                            std::f32::consts::PI * 0.25,
+                            aspect,
+                            0.1,
+                            10000.0,
+                        ),
+                    };
+                    device.cmd_update_buffer(
+                        main_cmd_buffer,
+                        locals_pbr_gpu,
+                        0,
+                        as_u8_slice(&[locals]),
+                    );
 
                     let clear_values = [vk::ClearValue {
                         color: vk::ClearColorValue {
@@ -490,9 +628,9 @@ fn main() -> anyhow::Result<()> {
                     let attachments = [frame_rtvs[image_index]];
                     let mut render_pass_attachments =
                         vk::RenderPassAttachmentBeginInfo::builder().attachments(&attachments);
-                    let triangle_pass_begin_desc = vk::RenderPassBeginInfo::builder()
-                        .render_pass(triangle_pass)
-                        .framebuffer(triangle_fbo)
+                    let mesh_pass_begin_desc = vk::RenderPassBeginInfo::builder()
+                        .render_pass(mesh_pass)
+                        .framebuffer(mesh_fbo)
                         .render_area(vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
                             extent: vk::Extent2D {
@@ -504,15 +642,32 @@ fn main() -> anyhow::Result<()> {
                         .push_next(&mut render_pass_attachments);
                     device.cmd_begin_render_pass(
                         main_cmd_buffer,
-                        &triangle_pass_begin_desc,
+                        &mesh_pass_begin_desc,
                         vk::SubpassContents::INLINE,
                     );
 
-                    device.cmd_bind_vertex_buffers(main_cmd_buffer, 0, &[triangle_gpu], &[0]);
+                    let base_offset = num_indices as u64 * 4;
+                    device.cmd_bind_vertex_buffers(
+                        main_cmd_buffer,
+                        0,
+                        &[mesh_gpu, mesh_gpu, mesh_gpu, mesh_gpu],
+                        &[
+                            base_offset,
+                            base_offset + 840_888,
+                            base_offset + 2_802_960,
+                            base_offset + 1_681_776,
+                        ],
+                    );
+                    device.cmd_bind_index_buffer(
+                        main_cmd_buffer,
+                        mesh_gpu,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
                     device.cmd_bind_pipeline(
                         main_cmd_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
-                        triangle_pipeline[0],
+                        mesh_pipeline[0],
                     );
                     device.cmd_set_scissor(
                         main_cmd_buffer,
@@ -537,7 +692,15 @@ fn main() -> anyhow::Result<()> {
                             max_depth: 1.0,
                         }],
                     );
-                    device.cmd_draw(main_cmd_buffer, 3, 1, 0, 0);
+                    device.cmd_bind_descriptor_sets(
+                        main_cmd_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        mesh_layout,
+                        0,
+                        &mesh_set,
+                        &[],
+                    );
+                    device.cmd_draw_indexed(main_cmd_buffer, num_indices as _, 1, 0, 0, 0);
                     device.cmd_end_render_pass(main_cmd_buffer);
 
                     device.end_command_buffer(main_cmd_buffer).unwrap();

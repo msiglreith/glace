@@ -13,3 +13,5 @@ winit = "0.24"
 byteorder = "1"
 anyhow = "1"
 gpu-allocator = "0.6"
+flink = { path = "../flink" }
+
