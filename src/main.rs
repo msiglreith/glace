@@ -258,21 +258,79 @@ fn main() -> anyhow::Result<()> {
             device.create_shader_module(&desc, None)?
         };
 
+        let depth_stencil_format = vk::Format::D32_SFLOAT;
+        let depth_stencil_image = {
+            let desc = vk::ImageCreateInfo::builder()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(depth_stencil_format)
+                .extent(vk::Extent3D {
+                    width: size.width as _,
+                    height: size.height as _,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT);
+
+            let image = device.create_image(&desc, None)?;
+            let alloc_desc = AllocationCreateDesc {
+                name: "Depth Buffer",
+                requirements: device.get_image_memory_requirements(image),
+                location: gpu_allocator::MemoryLocation::GpuOnly,
+                linear: false,
+            };
+            let allocation = allocator.allocate(&alloc_desc)?;
+            device.bind_image_memory(image, allocation.memory(), allocation.offset())?;
+            image
+        };
+
+        let depth_stencil_view = {
+            let view_desc = vk::ImageViewCreateInfo::builder()
+                .image(depth_stencil_image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(depth_stencil_format)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::DEPTH,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            device.create_image_view(&view_desc, None)?
+        };
+
         let mesh_pass = {
-            let attachments = [vk::AttachmentDescription {
-                format: surface_format.format,
-                samples: vk::SampleCountFlags::TYPE_1,
-                load_op: vk::AttachmentLoadOp::CLEAR,
-                store_op: vk::AttachmentStoreOp::STORE,
-                final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-                ..Default::default()
-            }];
+            let attachments = [
+                vk::AttachmentDescription {
+                    format: surface_format.format,
+                    samples: vk::SampleCountFlags::TYPE_1,
+                    load_op: vk::AttachmentLoadOp::CLEAR,
+                    store_op: vk::AttachmentStoreOp::STORE,
+                    final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+                    ..Default::default()
+                },
+                vk::AttachmentDescription {
+                    format: depth_stencil_format,
+                    samples: vk::SampleCountFlags::TYPE_1,
+                    load_op: vk::AttachmentLoadOp::CLEAR,
+                    store_op: vk::AttachmentStoreOp::DONT_CARE,
+                    final_layout: vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                    ..Default::default()
+                },
+            ];
             let color_attachments = [vk::AttachmentReference {
                 attachment: 0,
                 layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             }];
+            let depth_stencil_attachment = vk::AttachmentReference {
+                attachment: 1,
+                layout: vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+            };
             let subpasses = [vk::SubpassDescription::builder()
                 .color_attachments(&color_attachments)
+                .depth_stencil_attachment(&depth_stencil_attachment)
                 .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
                 .build()];
             let desc = vk::RenderPassCreateInfo::builder()
@@ -282,14 +340,24 @@ fn main() -> anyhow::Result<()> {
         };
 
         let mesh_fbo = {
-            let image_formats = [surface_format.format];
-            let images = [vk::FramebufferAttachmentImageInfo::builder()
-                .view_formats(&image_formats)
-                .width(size.width as _)
-                .height(size.height as _)
-                .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-                .layer_count(1)
-                .build()];
+            let image_formats0 = [surface_format.format];
+            let image_formats1 = [depth_stencil_format];
+            let images = [
+                vk::FramebufferAttachmentImageInfo::builder()
+                    .view_formats(&image_formats0)
+                    .width(size.width as _)
+                    .height(size.height as _)
+                    .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                    .layer_count(1)
+                    .build(),
+                vk::FramebufferAttachmentImageInfo::builder()
+                    .view_formats(&image_formats1)
+                    .width(size.width as _)
+                    .height(size.height as _)
+                    .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                    .layer_count(1)
+                    .build(),
+            ];
             let mut attachments =
                 vk::FramebufferAttachmentsCreateInfo::builder().attachment_image_infos(&images);
             let mut desc = vk::FramebufferCreateInfo::builder()
@@ -619,13 +687,21 @@ fn main() -> anyhow::Result<()> {
                         as_u8_slice(&[locals]),
                     );
 
-                    let clear_values = [vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.0, 0.0, 0.0, 0.0],
+                    let clear_values = [
+                        vk::ClearValue {
+                            color: vk::ClearColorValue {
+                                float32: [0.0, 0.0, 0.0, 0.0],
+                            },
                         },
-                    }];
+                        vk::ClearValue {
+                            depth_stencil: vk::ClearDepthStencilValue {
+                                depth: 1.0,
+                                stencil: 0,
+                            },
+                        },
+                    ];
 
-                    let attachments = [frame_rtvs[image_index]];
+                    let attachments = [frame_rtvs[image_index], depth_stencil_view];
                     let mut render_pass_attachments =
                         vk::RenderPassAttachmentBeginInfo::builder().attachments(&attachments);
                     let mesh_pass_begin_desc = vk::RenderPassBeginInfo::builder()
