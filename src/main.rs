@@ -258,6 +258,190 @@ fn main() -> anyhow::Result<()> {
             device.create_shader_module(&desc, None)?
         };
 
+        let upload_pool = {
+            let desc = vk::CommandPoolCreateInfo::builder().queue_family_index(family_index);
+            device.create_command_pool(&desc, None)?
+        };
+        let upload_cmd_buffer = {
+            let desc = vk::CommandBufferAllocateInfo::builder()
+                .command_pool(upload_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1);
+            device.allocate_command_buffers(&desc)?[0]
+        };
+
+        device
+            .begin_command_buffer(
+                upload_cmd_buffer,
+                &vk::CommandBufferBeginInfo::builder()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+                    .build(),
+            )
+            .unwrap();
+
+        device.cmd_copy_buffer(
+            upload_cmd_buffer,
+            mesh_cpu,
+            mesh_gpu,
+            &[vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: bin.len() as _,
+            }],
+        );
+
+        let mut load_png = |name: &str,
+                            format: vk::Format,
+                            downsample: bool|
+         -> anyhow::Result<(vk::Image, vk::ImageView, vk::Buffer)> {
+            let path = directory.join(name);
+            let img = image::open(&Path::new(&path)).unwrap().to_rgba8();
+            let img_width = img.width();
+            let img_height = img.height();
+            let img_data = img.into_raw();
+
+            let desc = vk::ImageCreateInfo::builder()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(format)
+                .extent(vk::Extent3D {
+                    width: img_width as _,
+                    height: img_height as _,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST);
+
+            let image = device.create_image(&desc, None)?;
+            let alloc_desc = AllocationCreateDesc {
+                name,
+                requirements: device.get_image_memory_requirements(image),
+                location: gpu_allocator::MemoryLocation::GpuOnly,
+                linear: false,
+            };
+            let allocation = allocator.allocate(&alloc_desc)?;
+            device.bind_image_memory(image, allocation.memory(), allocation.offset())?;
+
+            let desc = vk::BufferCreateInfo::builder()
+                .size(img_data.len() as _)
+                .usage(vk::BufferUsageFlags::TRANSFER_SRC);
+            let buffer = device.create_buffer(&desc, None)?;
+            let alloc_desc = AllocationCreateDesc {
+                name,
+                requirements: device.get_buffer_memory_requirements(buffer),
+                location: gpu_allocator::MemoryLocation::CpuToGpu,
+                linear: true,
+            };
+            let mut allocation = allocator.allocate(&alloc_desc)?;
+            {
+                let mapping = allocation.mapped_slice_mut().unwrap();
+                mapping[..img_data.len()].copy_from_slice(as_u8_slice(&img_data));
+            }
+            device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
+
+            let pre_transfer_barrier = [vk::ImageMemoryBarrier::builder()
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .build()];
+
+            device.cmd_pipeline_barrier(
+                upload_cmd_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &pre_transfer_barrier,
+            );
+
+            let copy = vk::BufferImageCopy {
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_extent: vk::Extent3D {
+                    width: img_width as _,
+                    height: img_height as _,
+                    depth: 1,
+                },
+                image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+            };
+
+            device.cmd_copy_buffer_to_image(
+                upload_cmd_buffer,
+                buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[copy],
+            );
+
+            let post_transfer_barrier = [vk::ImageMemoryBarrier::builder()
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .build()];
+            device.cmd_pipeline_barrier(
+                upload_cmd_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &post_transfer_barrier,
+            );
+
+            let view = {
+                let desc = vk::ImageViewCreateInfo::builder()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+
+                device.create_image_view(&desc, None)?
+            };
+
+            Ok((image, view, buffer))
+        };
+
+        let (albedo, albedo_view, albedo_buffer) =
+            load_png("SciFiHelmet_BaseColor.png", vk::Format::R8G8B8A8_SRGB, true)?;
+        let (normal, normal_view, normal_buffer) =
+            load_png("SciFiHelmet_Normal.png", vk::Format::R8G8B8A8_UNORM, true)?;
+
+        device.end_command_buffer(upload_cmd_buffer)?;
+        let upload_buffers = [upload_cmd_buffer];
+        let upload_submit = vk::SubmitInfo::builder()
+            .command_buffers(&upload_buffers)
+            .build();
+        device.queue_submit(queue, &[upload_submit], vk::Fence::null())?;
+
         let depth_stencil_format = vk::Format::D32_SFLOAT;
         let depth_stencil_image = {
             let desc = vk::ImageCreateInfo::builder()
@@ -316,7 +500,7 @@ fn main() -> anyhow::Result<()> {
                     samples: vk::SampleCountFlags::TYPE_1,
                     load_op: vk::AttachmentLoadOp::CLEAR,
                     store_op: vk::AttachmentStoreOp::DONT_CARE,
-                    final_layout: vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                    final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                     ..Default::default()
                 },
             ];
@@ -326,7 +510,7 @@ fn main() -> anyhow::Result<()> {
             }];
             let depth_stencil_attachment = vk::AttachmentReference {
                 attachment: 1,
-                layout: vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
             };
             let subpasses = [vk::SubpassDescription::builder()
                 .color_attachments(&color_attachments)
@@ -371,12 +555,34 @@ fn main() -> anyhow::Result<()> {
             device.create_framebuffer(&desc, None)?
         };
 
+        let mesh_sampler = {
+            let desc = vk::SamplerCreateInfo::builder(); // TODO: linear
+            device.create_sampler(&desc, None)?
+        };
+
         let mesh_set_layout = {
-            let bindings = [vk::DescriptorSetLayoutBinding::builder()
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::VERTEX)
-                .build()];
+            let sampler = [mesh_sampler];
+            let bindings = [
+                vk::DescriptorSetLayoutBinding::builder()
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .binding(0)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::ALL)
+                    .build(),
+                vk::DescriptorSetLayoutBinding::builder()
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .binding(1)
+                    .descriptor_count(2)
+                    .stage_flags(vk::ShaderStageFlags::ALL)
+                    .build(),
+                vk::DescriptorSetLayoutBinding::builder()
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .binding(2)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::ALL)
+                    .immutable_samplers(&sampler)
+                    .build(),
+            ];
             let desc = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
             device.create_descriptor_set_layout(&desc, None)?
         };
@@ -388,12 +594,18 @@ fn main() -> anyhow::Result<()> {
         };
 
         let mesh_set = {
-            let pool_sizes = [vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1,
-            }];
+            let pool_sizes = [
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::UNIFORM_BUFFER,
+                    descriptor_count: 1,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::SAMPLED_IMAGE,
+                    descriptor_count: 2,
+                },
+            ];
             let desc = vk::DescriptorPoolCreateInfo::builder()
-                .max_sets(1)
+                .max_sets(2)
                 .pool_sizes(&pool_sizes);
             let pool = device.create_descriptor_pool(&desc, None)?;
 
@@ -408,12 +620,33 @@ fn main() -> anyhow::Result<()> {
                 offset: 0,
                 range: vk::WHOLE_SIZE,
             }];
+            let image_info = [
+                vk::DescriptorImageInfo {
+                    sampler: vk::Sampler::null(),
+                    image_view: albedo_view,
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                },
+                vk::DescriptorImageInfo {
+                    sampler: vk::Sampler::null(),
+                    image_view: normal_view,
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                },
+            ];
             device.update_descriptor_sets(
-                &[vk::WriteDescriptorSet::builder()
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .dst_set(set[0])
-                    .buffer_info(&buffer_info)
-                    .build()],
+                &[
+                    vk::WriteDescriptorSet::builder()
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                        .dst_set(set[0])
+                        .dst_binding(0)
+                        .buffer_info(&buffer_info)
+                        .build(),
+                    vk::WriteDescriptorSet::builder()
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .dst_set(set[0])
+                        .dst_binding(1)
+                        .image_info(&image_info)
+                        .build(),
+                ],
                 &[],
             );
 
@@ -651,19 +884,6 @@ fn main() -> anyhow::Result<()> {
                     device
                         .begin_command_buffer(main_cmd_buffer, &begin_desc)
                         .unwrap();
-
-                    if frame_index == 0 {
-                        device.cmd_copy_buffer(
-                            main_cmd_buffer,
-                            mesh_cpu,
-                            mesh_gpu,
-                            &[vk::BufferCopy {
-                                src_offset: 0,
-                                dst_offset: 0,
-                                size: bin.len() as _,
-                            }],
-                        );
-                    }
 
                     let size = window.inner_size();
                     let aspect = size.width as f32 / size.height as f32;

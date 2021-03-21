@@ -8,6 +8,11 @@ layout (location = 2) in vec4 a_tangent_world;
 
 layout (location = 0) out vec4 o_color;
 
+layout (binding = 1) uniform texture2D u_maps[2];
+layout (binding = 2) uniform sampler u_sampler;
+
 void main() {
-    o_color = vec4(0.5 * a_normal_world + 0.5, 1.0);
+    vec3 normal_obj = texture(sampler2D(u_maps[1], u_sampler), a_texcoord).xyz;
+    vec4 albedo = texture(sampler2D(u_maps[0], u_sampler), a_texcoord);
+    o_color = vec4(normal_obj, 1.0);
 }
