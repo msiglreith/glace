@@ -50,6 +50,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "shader"
+version = "0.1.0"
+dependencies = [
+ "glace",
+ "spirv-std",
+ "spirv-std-macros",
+]
+
+[[package]]
 name = "spirv-std"
 version = "0.4.0-alpha.0"
 source = "git+https://github.com/EmbarkStudios/rust-gpu.git?rev=908487ae1dcbc0a3bf119294a4f12dd7bc87c218#908487ae1dcbc0a3bf119294a4f12dd7bc87c218"

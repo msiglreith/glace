@@ -4,7 +4,7 @@ use ash::{
     vk,
 };
 use camera::{Camera, InputMap};
-use flink::{f32x4x4, vec3};
+use glace::{f32x4x4, vec3};
 use gpu_allocator::{AllocationCreateDesc, VulkanAllocator, VulkanAllocatorCreateDesc};
 use std::{fs::File, mem, path::Path};
 use winit::{
@@ -243,19 +243,6 @@ fn main() -> anyhow::Result<()> {
             let allocation = allocator.allocate(&alloc_desc)?;
             device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
             buffer
-        };
-
-        let mesh_vs = {
-            let mut file = File::open("assets/triangle.vert.spv")?;
-            let code = ash::util::read_spv(&mut file)?;
-            let desc = vk::ShaderModuleCreateInfo::builder().code(&code);
-            device.create_shader_module(&desc, None)?
-        };
-        let mesh_fs = {
-            let mut file = File::open("assets/triangle.frag.spv")?;
-            let code = ash::util::read_spv(&mut file)?;
-            let desc = vk::ShaderModuleCreateInfo::builder().code(&code);
-            device.create_shader_module(&desc, None)?
         };
 
         let upload_pool = {
@@ -653,13 +640,27 @@ fn main() -> anyhow::Result<()> {
             set
         };
 
+        let shader = {
+            let mut spirv = std::io::Cursor::new(include_bytes!(env!("shader.spv")));
+            let code = ash::util::read_spv(&mut spirv)?;
+            let desc = vk::ShaderModuleCreateInfo::builder().code(&code);
+            device.create_shader_module(&desc, None)?
+        };
+
+        let mesh_fs = {
+            let mut file = File::open("assets/triangle.frag.spv")?;
+            let code = ash::util::read_spv(&mut file)?;
+            let desc = vk::ShaderModuleCreateInfo::builder().code(&code);
+            device.create_shader_module(&desc, None)?
+        };
+
         let mesh_pipeline = {
-            let entry_vs = std::ffi::CStr::from_bytes_with_nul(b"main\0")?;
+            let entry_vs = std::ffi::CStr::from_bytes_with_nul(b"mesh_vs\0")?;
             let entry_fs = std::ffi::CStr::from_bytes_with_nul(b"main\0")?;
             let stages = [
                 vk::PipelineShaderStageCreateInfo::builder()
                     .stage(vk::ShaderStageFlags::VERTEX)
-                    .module(mesh_vs)
+                    .module(shader)
                     .name(&entry_vs)
                     .build(),
                 vk::PipelineShaderStageCreateInfo::builder()

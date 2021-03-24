@@ -1,4 +1,4 @@
-use flink::Vec3;
+use glace::Vec3;
 use winit::event::ElementState;
 
 pub struct InputMap {
