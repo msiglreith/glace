@@ -1,11 +1,10 @@
 use ash::{
-    extensions::khr,
-    version::{DeviceV1_0, DeviceV1_2, EntryV1_0, InstanceV1_0},
+    version::{DeviceV1_0, DeviceV1_2},
     vk,
 };
 use camera::{Camera, InputMap};
 use glace::{f32x4x4, vec3};
-use gpu_allocator::{AllocationCreateDesc, VulkanAllocator, VulkanAllocatorCreateDesc};
+use gpu_allocator::AllocationCreateDesc;
 use std::{fs::File, mem, path::Path};
 use winit::{
     dpi::LogicalSize,
@@ -15,6 +14,10 @@ use winit::{
 };
 
 mod camera;
+mod device;
+mod instance;
+mod pass;
+mod swapchain;
 // mod ktx;
 
 #[repr(C)]
@@ -45,146 +48,9 @@ fn main() -> anyhow::Result<()> {
     let frames_in_flight: usize = 2;
 
     unsafe {
-        let entry = ash::Entry::new()?;
-        let surface_extensions = ash_window::enumerate_required_extensions(&window)?;
-        let instance_extensions = surface_extensions
-            .iter()
-            .map(|ext| ext.as_ptr())
-            .collect::<Vec<_>>();
-        let app_desc = vk::ApplicationInfo::builder().api_version(vk::make_version(1, 2, 0));
-        let instance_desc = vk::InstanceCreateInfo::builder()
-            .application_info(&app_desc)
-            .enabled_extension_names(&instance_extensions);
-        let instance = entry.create_instance(&instance_desc, None)?;
-
-        let surface = ash_window::create_surface(&entry, &instance, &window, None)?;
-        let surface_fn = khr::Surface::new(&entry, &instance);
-
-        let (physical_device, device_id, family_index, _family_properties) = instance
-            .enumerate_physical_devices()?
-            .into_iter()
-            .enumerate()
-            .find_map(|(device_id, device)| {
-                instance
-                    .get_physical_device_queue_family_properties(device)
-                    .into_iter()
-                    .enumerate()
-                    .find(|(i, family)| {
-                        let universal = family
-                            .queue_flags
-                            .contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE);
-                        let surface_support = surface_fn
-                            .get_physical_device_surface_support(device, *i as _, surface)
-                            .unwrap();
-
-                        universal && surface_support
-                    })
-                    .map(|(index, family)| (device, device_id, index as u32, family))
-            })
-            .unwrap();
-
-        let (device, queue) = {
-            let device_extensions = vec![khr::Swapchain::name().as_ptr()];
-            let features = vk::PhysicalDeviceFeatures::builder();
-            let mut features12 =
-                vk::PhysicalDeviceVulkan12Features::builder().imageless_framebuffer(true);
-
-            let queue_priorities = [1.0];
-            let queue_descs = [vk::DeviceQueueCreateInfo::builder()
-                .queue_family_index(family_index)
-                .queue_priorities(&queue_priorities)
-                .build()];
-            let device_desc = vk::DeviceCreateInfo::builder()
-                .queue_create_infos(&queue_descs)
-                .enabled_extension_names(&device_extensions)
-                .enabled_features(&features)
-                .push_next(&mut features12);
-
-            let device = instance.create_device(physical_device, &device_desc, None)?;
-            let queue = device.get_device_queue(family_index, 0);
-
-            (device, queue)
-        };
-
-        let swapchain_fn = khr::Swapchain::new(&instance, &device);
-        let (swapchain, surface_format) = {
-            let surface_capabilities =
-                surface_fn.get_physical_device_surface_capabilities(physical_device, surface)?;
-            let surface_formats =
-                surface_fn.get_physical_device_surface_formats(physical_device, surface)?;
-
-            let surface_format = surface_formats
-                .into_iter()
-                .map(|format| match format.format {
-                    vk::Format::UNDEFINED => vk::SurfaceFormatKHR {
-                        format: vk::Format::R8G8B8_SRGB,
-                        color_space: format.color_space,
-                    },
-                    _ => format,
-                })
-                .next()
-                .unwrap();
-
-            let swapchain_desc = vk::SwapchainCreateInfoKHR::builder()
-                .surface(surface)
-                .min_image_count(2)
-                .image_format(surface_format.format)
-                .image_color_space(surface_format.color_space)
-                .image_extent(vk::Extent2D {
-                    width: size.width as _,
-                    height: size.height as _,
-                })
-                .image_array_layers(1)
-                .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-                .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .pre_transform(surface_capabilities.current_transform)
-                .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-                .present_mode(vk::PresentModeKHR::FIFO)
-                .clipped(true);
-            let swapchain = swapchain_fn.create_swapchain(&swapchain_desc, None)?;
-
-            (swapchain, surface_format)
-        };
-
-        let frame_images = swapchain_fn.get_swapchain_images(swapchain)?;
-        let mut frame_semaphores = (0..frame_images.len())
-            .map(|_| {
-                let desc = vk::SemaphoreCreateInfo::builder();
-                device.create_semaphore(&desc, None)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let frame_rtvs = frame_images
-            .iter()
-            .map(|image| {
-                let view_desc = vk::ImageViewCreateInfo::builder()
-                    .image(*image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(surface_format.format)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    });
-                device.create_image_view(&view_desc, None)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Semaphore to use for next swapchain acquire operation.
-        // Will be cycled through with `frame_semaphores`.
-        let mut acquire_semaphore = {
-            let desc = vk::SemaphoreCreateInfo::builder();
-            device.create_semaphore(&desc, None)?
-        };
-
-        let mut allocator = VulkanAllocator::new(&VulkanAllocatorCreateDesc {
-            instance,
-            device: device.clone(),
-            physical_device,
-            debug_settings: Default::default(),
-        });
+        let instance = instance::Instance::new(&window)?;
+        let mut device = device::Device::new(&instance)?;
+        let mut wsi = swapchain::Swapchain::new(&instance, &device, size.width, size.height)?;
 
         let directory = Path::new("assets");
 
@@ -202,7 +68,7 @@ fn main() -> anyhow::Result<()> {
                 location: gpu_allocator::MemoryLocation::CpuToGpu,
                 linear: true,
             };
-            let mut allocation = allocator.allocate(&alloc_desc)?;
+            let mut allocation = device.allocator.allocate(&alloc_desc)?;
             {
                 let mapping = allocation.mapped_slice_mut().unwrap();
                 mapping[..bin.len()].copy_from_slice(as_u8_slice(&bin));
@@ -224,7 +90,7 @@ fn main() -> anyhow::Result<()> {
                 location: gpu_allocator::MemoryLocation::GpuOnly,
                 linear: true,
             };
-            let allocation = allocator.allocate(&alloc_desc)?;
+            let allocation = device.allocator.allocate(&alloc_desc)?;
             device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
             buffer
         };
@@ -240,13 +106,14 @@ fn main() -> anyhow::Result<()> {
                 location: gpu_allocator::MemoryLocation::GpuOnly,
                 linear: true,
             };
-            let allocation = allocator.allocate(&alloc_desc)?;
+            let allocation = device.allocator.allocate(&alloc_desc)?;
             device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
             buffer
         };
 
         let upload_pool = {
-            let desc = vk::CommandPoolCreateInfo::builder().queue_family_index(family_index);
+            let desc =
+                vk::CommandPoolCreateInfo::builder().queue_family_index(instance.family_index);
             device.create_command_pool(&desc, None)?
         };
         let upload_cmd_buffer = {
@@ -308,7 +175,7 @@ fn main() -> anyhow::Result<()> {
                 location: gpu_allocator::MemoryLocation::GpuOnly,
                 linear: false,
             };
-            let allocation = allocator.allocate(&alloc_desc)?;
+            let allocation = device.allocator.allocate(&alloc_desc)?;
             device.bind_image_memory(image, allocation.memory(), allocation.offset())?;
 
             let desc = vk::BufferCreateInfo::builder()
@@ -321,7 +188,7 @@ fn main() -> anyhow::Result<()> {
                 location: gpu_allocator::MemoryLocation::CpuToGpu,
                 linear: true,
             };
-            let mut allocation = allocator.allocate(&alloc_desc)?;
+            let mut allocation = device.allocator.allocate(&alloc_desc)?;
             {
                 let mapping = allocation.mapped_slice_mut().unwrap();
                 mapping[..img_data.len()].copy_from_slice(as_u8_slice(&img_data));
@@ -427,7 +294,7 @@ fn main() -> anyhow::Result<()> {
         let upload_submit = vk::SubmitInfo::builder()
             .command_buffers(&upload_buffers)
             .build();
-        device.queue_submit(queue, &[upload_submit], vk::Fence::null())?;
+        device.queue_submit(device.queue, &[upload_submit], vk::Fence::null())?;
 
         let depth_stencil_format = vk::Format::D32_SFLOAT;
         let depth_stencil_image = {
@@ -452,7 +319,7 @@ fn main() -> anyhow::Result<()> {
                 location: gpu_allocator::MemoryLocation::GpuOnly,
                 linear: false,
             };
-            let allocation = allocator.allocate(&alloc_desc)?;
+            let allocation = device.allocator.allocate(&alloc_desc)?;
             device.bind_image_memory(image, allocation.memory(), allocation.offset())?;
             image
         };
@@ -475,7 +342,7 @@ fn main() -> anyhow::Result<()> {
         let mesh_pass = {
             let attachments = [
                 vk::AttachmentDescription {
-                    format: surface_format.format,
+                    format: wsi.surface_format.format,
                     samples: vk::SampleCountFlags::TYPE_1,
                     load_op: vk::AttachmentLoadOp::CLEAR,
                     store_op: vk::AttachmentStoreOp::STORE,
@@ -511,7 +378,7 @@ fn main() -> anyhow::Result<()> {
         };
 
         let mesh_fbo = {
-            let image_formats0 = [surface_format.format];
+            let image_formats0 = [wsi.surface_format.format];
             let image_formats1 = [depth_stencil_format];
             let images = [
                 vk::FramebufferAttachmentImageInfo::builder()
@@ -648,7 +515,7 @@ fn main() -> anyhow::Result<()> {
         };
 
         let mesh_fs = {
-            let mut file = File::open("assets/triangle.frag.spv")?;
+            let mut file = File::open(directory.join("triangle.frag.spv"))?;
             let code = ash::util::read_spv(&mut file)?;
             let desc = vk::ShaderModuleCreateInfo::builder().code(&code);
             device.create_shader_module(&desc, None)?
@@ -777,32 +644,6 @@ fn main() -> anyhow::Result<()> {
                 .unwrap()
         };
 
-        let main_cmd_pools = (0..frames_in_flight)
-            .map(|_| {
-                let desc = vk::CommandPoolCreateInfo::builder().queue_family_index(family_index);
-                device.create_command_pool(&desc, None)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let main_cmd_buffers = main_cmd_pools
-            .iter()
-            .map(|pool| {
-                let desc = vk::CommandBufferAllocateInfo::builder()
-                    .command_pool(*pool)
-                    .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(1);
-                device.allocate_command_buffers(&desc)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let main_semaphore = {
-            let mut timeline_desc = vk::SemaphoreTypeCreateInfo::builder()
-                .semaphore_type(vk::SemaphoreType::TIMELINE)
-                .initial_value(0);
-            let desc = vk::SemaphoreCreateInfo::builder().push_next(&mut timeline_desc);
-            device.create_semaphore(&desc, None)?
-        };
-
         let render_semaphores = (0..frames_in_flight)
             .map(|_| {
                 let desc = vk::SemaphoreCreateInfo::builder();
@@ -824,8 +665,8 @@ fn main() -> anyhow::Result<()> {
                     window_id,
                 } if window_id == window.id() => *control_flow = ControlFlow::Exit,
                 Event::LoopDestroyed => {
-                    swapchain_fn.destroy_swapchain(swapchain, None);
-                    surface_fn.destroy_surface(surface, None);
+                    wsi.swapchain_fn.destroy_swapchain(wsi.swapchain, None);
+                    instance.surface_fn.destroy_surface(instance.surface, None);
                 }
                 Event::DeviceEvent { event, .. } => match event {
                     DeviceEvent::MouseMotion { delta } => {
@@ -843,13 +684,13 @@ fn main() -> anyhow::Result<()> {
                     let image_index = {
                         let mut index = 0;
                         let desc = vk::AcquireNextImageInfoKHR::builder()
-                            .swapchain(swapchain)
+                            .swapchain(wsi.swapchain)
                             .timeout(!0)
                             .fence(vk::Fence::null())
-                            .semaphore(acquire_semaphore)
-                            .device_mask(1u32 << device_id)
+                            .semaphore(wsi.acquire_semaphore)
+                            .device_mask(1u32 << instance.device_id)
                             .build();
-                        let result = swapchain_fn.fp().acquire_next_image2_khr(
+                        let result = wsi.swapchain_fn.fp().acquire_next_image2_khr(
                             device.handle(),
                             &desc,
                             &mut index,
@@ -860,12 +701,15 @@ fn main() -> anyhow::Result<()> {
                         }
                     };
 
-                    std::mem::swap(&mut frame_semaphores[image_index], &mut acquire_semaphore);
+                    std::mem::swap(
+                        &mut wsi.frame_semaphores[image_index],
+                        &mut wsi.acquire_semaphore,
+                    );
 
                     let frame_local = frame_index % frames_in_flight;
 
                     if frame_index >= frames_in_flight {
-                        let semaphores = [main_semaphore];
+                        let semaphores = [device.timeline];
                         let wait_values = [(frame_index - frames_in_flight + 1) as u64];
                         let wait_info = vk::SemaphoreWaitInfo::builder()
                             .semaphores(&semaphores)
@@ -873,7 +717,7 @@ fn main() -> anyhow::Result<()> {
                         device.wait_semaphores(&wait_info, !0).unwrap();
                         device
                             .reset_command_pool(
-                                main_cmd_pools[frame_local],
+                                device.cmd_pools[frame_local],
                                 vk::CommandPoolResetFlags::empty(),
                             )
                             .unwrap();
@@ -881,7 +725,7 @@ fn main() -> anyhow::Result<()> {
 
                     let begin_desc = vk::CommandBufferBeginInfo::builder()
                         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-                    let main_cmd_buffer = main_cmd_buffers[frame_local][0];
+                    let main_cmd_buffer = device.cmd_buffers[frame_local];
                     device
                         .begin_command_buffer(main_cmd_buffer, &begin_desc)
                         .unwrap();
@@ -922,7 +766,7 @@ fn main() -> anyhow::Result<()> {
                         },
                     ];
 
-                    let attachments = [frame_rtvs[image_index], depth_stencil_view];
+                    let attachments = [wsi.frame_rtvs[image_index], depth_stencil_view];
                     let mut render_pass_attachments =
                         vk::RenderPassAttachmentBeginInfo::builder().attachments(&attachments);
                     let mesh_pass_begin_desc = vk::RenderPassBeginInfo::builder()
@@ -1002,8 +846,8 @@ fn main() -> anyhow::Result<()> {
 
                     device.end_command_buffer(main_cmd_buffer).unwrap();
 
-                    let main_waits = [frame_semaphores[image_index]];
-                    let main_signals = [main_semaphore, render_semaphores[frame_local]];
+                    let main_waits = [wsi.frame_semaphores[image_index]];
+                    let main_signals = [device.timeline, render_semaphores[frame_local]];
                     let main_stages = [vk::PipelineStageFlags::BOTTOM_OF_PIPE]; // TODO
                     let main_buffers = [main_cmd_buffer];
 
@@ -1020,17 +864,19 @@ fn main() -> anyhow::Result<()> {
                         .push_next(&mut timeline_submit)
                         .build();
                     device
-                        .queue_submit(queue, &[main_submit], vk::Fence::null())
+                        .queue_submit(device.queue, &[main_submit], vk::Fence::null())
                         .unwrap();
 
                     let present_wait = [render_semaphores[frame_local]];
-                    let present_swapchains = [swapchain];
+                    let present_swapchains = [wsi.swapchain];
                     let present_images = [image_index as u32];
                     let present_info = vk::PresentInfoKHR::builder()
                         .wait_semaphores(&present_wait)
                         .swapchains(&present_swapchains)
                         .image_indices(&present_images);
-                    swapchain_fn.queue_present(queue, &present_info).unwrap();
+                    wsi.swapchain_fn
+                        .queue_present(device.queue, &present_info)
+                        .unwrap();
 
                     frame_index += 1;
                 }

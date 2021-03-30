@@ -1,0 +1,11 @@
+[package]
+name = "glace"
+version = "0.1.0"
+authors = ["msiglreith <m.siglreith@gmail.com>"]
+edition = "2018"
+workspace = ".."
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+spirv-std = "0.4.0-alpha.3" # { git = "https://github.com/EmbarkStudios/rust-gpu.git", rev = "908487ae1dcbc0a3bf119294a4f12dd7bc87c218" }

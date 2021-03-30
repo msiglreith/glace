@@ -1,27 +1,24 @@
 [package]
-name = "glace-demo"
+name = "glace-grr"
 version = "0.1.0"
 authors = ["msiglreith <m.siglreith@gmail.com>"]
 edition = "2018"
+workspace = ".."
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-ash = "0.32"
-ash-window = "0.6"
-winit = "0.24"
-byteorder = "1"
+grr = { git = "https://github.com/msiglreith/grr.git" }
 anyhow = "1"
-gpu-allocator = "0.6"
-glace = { path = "../../glace" }
 image = "0.23"
+winit = "0.24"
+glace = { path = "../glace" }
+byteorder = "1"
+raw-gl-context = "0.1.2"
 
 [build-dependencies]
-spirv-builder = { git = "https://github.com/EmbarkStudios/rust-gpu.git", rev = "908487ae1dcbc0a3bf119294a4f12dd7bc87c218" }
+spirv-builder = { git = "https://github.com/EmbarkStudios/rust-gpu.git", rev = "f09a5f6e65dd54ef1b825d1bd3987da089c89cd9" } # must be git ref
 anyhow = "1"
-
-[profile.dev]
-opt-level = 1
 
 [profile.dev.build-override]
 opt-level = 3

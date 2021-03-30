@@ -1,5 +1,8 @@
-use core::ops::{Add, Mul, Sub, Div};
-use super::Element;
+use core::{
+    default::Default,
+    ops::{Add, Div, Mul, Sub},
+};
+use spirv_std::{scalar::Scalar, vector::Vector};
 
 #[derive(Debug, Copy, Clone)]
 #[cfg_attr(target_arch = "spirv", repr(simd))]
@@ -8,11 +11,19 @@ pub struct Vec2<T> {
     pub y: T,
 }
 
-impl<T: Element> Vec2<T> {
-    pub const ZERO: Self = Vec2 {
-        x: T::ZERO,
-        y: T::ZERO,
-    };
+unsafe impl<T: Scalar> Vector<T, 2> for Vec2<T> {}
+
+impl<T: Scalar> Default for Vec2<T> {
+    fn default() -> Self {
+        Vec2 {
+            x: Default::default(),
+            y: Default::default(),
+        }
+    }
+}
+
+pub fn vec2<T>(x: T, y: T) -> Vec2<T> {
+    Vec2 { x, y }
 }
 
 impl Vec2<f32> {
@@ -66,7 +77,7 @@ impl Vec2<f32> {
     #[inline]
     #[cfg(target_arch = "spirv")]
     pub fn fwidth(&self) -> Self {
-        let mut result = Self::ZERO;
+        let mut result = Self::default();
         unsafe {
             asm! {
                 "%vec = OpLoad typeof*{1} {1}",
@@ -148,7 +159,7 @@ impl Mul for Vec2<f32> {
     fn mul(self, other: Self) -> Self {
         #[cfg(target_arch = "spirv")]
         {
-            let mut result = Self::ZERO;
+            let mut result = Self::default();
             unsafe {
                 asm! {
                     "%vec1 = OpLoad typeof*{1} {1}",
@@ -178,7 +189,7 @@ impl Mul<f32> for Vec2<f32> {
     fn mul(self, other: f32) -> Self {
         #[cfg(target_arch = "spirv")]
         {
-            let mut result = Self::ZERO;
+            let mut result = Self::default();
             unsafe {
                 asm! {
                     "%vec = OpLoad typeof*{1} {1}",
@@ -216,7 +227,7 @@ impl Div for Vec2<f32> {
     fn div(self, other: Self) -> Self {
         #[cfg(target_arch = "spirv")]
         {
-            let mut result = Self::ZERO;
+            let mut result = Self::default();
             unsafe {
                 asm! {
                     "%vec1 = OpLoad typeof*{1} {1}",

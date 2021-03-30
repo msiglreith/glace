@@ -1,5 +1,6 @@
-use core::ops::{Add, Mul, Sub, Shr, BitXor};
-use super::Element;
+use core::default::Default;
+use core::ops::{Add, BitXor, Mul, Shr, Sub};
+use spirv_std::{scalar::Scalar, vector::Vector};
 
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
@@ -12,12 +13,16 @@ pub struct Vec3<T> {
     pub z: T,
 }
 
-impl<T: Element> Vec3<T> {
-    pub const ZERO: Self = Vec3 {
-        x: T::ZERO,
-        y: T::ZERO,
-        z: T::ZERO,
-    };
+unsafe impl<T: Scalar> Vector<T, 3> for Vec3<T> {}
+
+impl<T: Scalar> Default for Vec3<T> {
+    fn default() -> Self {
+        Vec3 {
+            x: Default::default(),
+            y: Default::default(),
+            z: Default::default(),
+        }
+    }
 }
 
 pub fn vec3<T>(x: T, y: T, z: T) -> Vec3<T> {
@@ -51,7 +56,7 @@ impl Vec3<u32> {
     pub fn wrapping_add(self, other: Self) -> Self {
         #[cfg(target_arch = "spirv")]
         {
-            let mut result = Self::ZERO;
+            let mut result = Self::default();
             unsafe {
                 asm! {
                     "%vec1 = OpLoad typeof*{1} {1}",
@@ -78,7 +83,7 @@ impl Vec3<u32> {
     pub fn wrapping_mul(self, other: Self) -> Self {
         #[cfg(target_arch = "spirv")]
         {
-            let mut result = Self::ZERO;
+            let mut result = Self::default();
             unsafe {
                 asm! {
                     "%vec1 = OpLoad typeof*{1} {1}",
@@ -108,7 +113,7 @@ impl Shr for Vec3<u32> {
     fn shr(self, rhs: Self) -> Self {
         #[cfg(target_arch = "spirv")]
         {
-            let mut result = Self::ZERO;
+            let mut result = Self::default();
             unsafe {
                 asm! {
                     "%vec = OpLoad typeof*{1} {1}",
@@ -138,7 +143,7 @@ impl BitXor for Vec3<u32> {
     fn bitxor(self, rhs: Self) -> Self {
         #[cfg(target_arch = "spirv")]
         {
-            let mut result = Self::ZERO;
+            let mut result = Self::default();
             unsafe {
                 asm! {
                     "%vec1 = OpLoad typeof*{1} {1}",
@@ -193,7 +198,7 @@ impl Mul<u32> for Vec3<u32> {
     fn mul(self, other: u32) -> Self {
         #[cfg(target_arch = "spirv")]
         {
-            let mut result = Self::ZERO;
+            let mut result = Self::default();
             unsafe {
                 asm! {
                     "%vec = OpLoad typeof*{1} {1}",
@@ -224,7 +229,7 @@ impl Mul<f32> for Vec3<f32> {
     fn mul(self, other: f32) -> Self {
         #[cfg(target_arch = "spirv")]
         {
-            let mut result = Self::ZERO;
+            let mut result = Self::default();
             unsafe {
                 asm! {
                     "%vec = OpLoad typeof*{1} {1}",

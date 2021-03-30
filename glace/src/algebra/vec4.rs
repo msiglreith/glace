@@ -1,5 +1,6 @@
-use core::ops::{Mul};
-use super::Element;
+use core::default::Default;
+use core::ops::Mul;
+use spirv_std::{scalar::Scalar, vector::Vector};
 
 #[derive(Debug, Copy, Clone)]
 #[cfg_attr(target_arch = "spirv", repr(simd))]
@@ -10,13 +11,17 @@ pub struct Vec4<T> {
     pub w: T,
 }
 
-impl<T: Element> Vec4<T> {
-    pub const ZERO: Self = Vec4 {
-        x: T::ZERO,
-        y: T::ZERO,
-        z: T::ZERO,
-        w: T::ZERO,
-    };
+unsafe impl<T: Scalar> Vector<T, 4> for Vec4<T> {}
+
+impl<T: Scalar> Default for Vec4<T> {
+    fn default() -> Self {
+        Vec4 {
+            x: Default::default(),
+            y: Default::default(),
+            z: Default::default(),
+            w: Default::default(),
+        }
+    }
 }
 
 impl Vec4<f32> {
@@ -35,7 +40,7 @@ impl Mul<f32> for Vec4<f32> {
     fn mul(self, other: f32) -> Self {
         #[cfg(target_arch = "spirv")]
         {
-            let mut result = Self::ZERO;
+            let mut result = Self::default();
             unsafe {
                 asm! {
                     "%vec = OpLoad typeof*{1} {1}",
