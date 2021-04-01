@@ -3,5 +3,7 @@
 #![register_attr(spirv)]
 
 pub mod cubemap;
+pub mod debug;
+pub mod ocean;
 pub mod pbr;
 pub mod skybox;

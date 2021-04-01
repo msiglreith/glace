@@ -160,7 +160,7 @@ fn main() -> anyhow::Result<()> {
         let sampler = grr.create_sampler(grr::SamplerDesc {
             min_filter: grr::Filter::Linear,
             mag_filter: grr::Filter::Linear,
-            mip_map: None,
+            mip_map: Some(grr::Filter::Linear),
             address: (
                 grr::SamplerAddress::ClampBorder,
                 grr::SamplerAddress::ClampBorder,
@@ -202,6 +202,37 @@ fn main() -> anyhow::Result<()> {
         let empty_array = grr.create_vertex_array(&[])?;
 
         let spirv_dir = Path::new(env!("spv"));
+
+        let debug_quad_vs = grr.create_shader(
+            grr::ShaderStage::Vertex,
+            grr::ShaderSource::Spirv {
+                entrypoint: "debug::quad_vs",
+            },
+            &std::fs::read(spirv_dir.join("debugquad_vs"))?,
+            grr::ShaderFlags::VERBOSE,
+        )?;
+        let debug_quad_fs = grr.create_shader(
+            grr::ShaderStage::Fragment,
+            grr::ShaderSource::Spirv {
+                entrypoint: "debug::quad_fs",
+            },
+            &std::fs::read(spirv_dir.join("debugquad_fs"))?,
+            grr::ShaderFlags::VERBOSE,
+        )?;
+
+        let debug_quad_pipeline = grr.create_graphics_pipeline(
+            grr::VertexPipelineDesc {
+                vertex_shader: debug_quad_vs,
+                tessellation_control_shader: None,
+                tessellation_evaluation_shader: None,
+                geometry_shader: None,
+                fragment_shader: Some(debug_quad_fs),
+            },
+            grr::PipelineFlags::VERBOSE,
+        )?;
+
+        let debug_quad_indices =
+            grr.create_buffer_from_host(&[0u8, 1, 2, 2, 1, 3], grr::MemoryFlags::DEVICE_LOCAL)?;
 
         let pbr_vs = grr.create_shader(
             grr::ShaderStage::Vertex,
@@ -550,6 +581,27 @@ fn main() -> anyhow::Result<()> {
                         0..1,
                         0,
                     );
+
+                    // debug textures
+                    grr.bind_pipeline(debug_quad_pipeline);
+                    grr.bind_vertex_array(empty_array);
+                    grr.bind_index_buffer(empty_array, debug_quad_indices);
+                    {
+                        let height = 256.0 / (0.5 * size.height as f32);
+                        let width = height / aspect;
+                        grr.bind_uniform_constants(
+                            debug_quad_pipeline,
+                            1,
+                            &[
+                                grr::Constant::Vec2([-1.0, 1.0 - height]),
+                                grr::Constant::Vec2([width, height]),
+                            ],
+                        );
+                    }
+                    grr.bind_image_views(0, &[albedo.as_view()]);
+                    grr.bind_samplers(0, &[sampler]);
+                    grr.draw_indexed(grr::Primitive::Triangles, grr::IndexTy::U8, 0..6, 0..1, 0);
+
                     grr.delete_buffer(u_locals);
                     grr.delete_buffer(u_locals_inv);
 

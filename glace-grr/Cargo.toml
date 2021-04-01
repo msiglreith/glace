@@ -19,9 +19,3 @@ raw-gl-context = "0.1.2"
 [build-dependencies]
 spirv-builder = { git = "https://github.com/EmbarkStudios/rust-gpu.git", rev = "f09a5f6e65dd54ef1b825d1bd3987da089c89cd9" } # must be git ref
 anyhow = "1"
-
-[profile.dev.build-override]
-opt-level = 3
-
-[profile.release.build-override]
-opt-level = 3
