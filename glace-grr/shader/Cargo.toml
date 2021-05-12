@@ -10,6 +10,5 @@ crate-type = ["dylib"]
 
 [dependencies]
 glace = { path = "../../glace" }
-spirv-std = "0.4.0-alpha.3" # { git = "https://github.com/EmbarkStudios/rust-gpu.git", rev = "908487ae1dcbc0a3bf119294a4f12dd7bc87c218" }
-spirv-std-macros = "0.4.0-alpha.3" # { git = "https://github.com/EmbarkStudios/rust-gpu.git", rev = "908487ae1dcbc0a3bf119294a4f12dd7bc87c218" }
-
+spirv-std = { git = "https://github.com/EmbarkStudios/rust-gpu.git", rev = "4395b84114115752df2829c23109bb6c5048f4ec", features = ["const-generics"] }
+spirv-std-macros = "0.4.0-alpha.3" # { git = "https://github.com/EmbarkStudios/rust-gpu.git", rev = "561f0dd98466b150ef2ae95713e0cc5e8788cc54" }

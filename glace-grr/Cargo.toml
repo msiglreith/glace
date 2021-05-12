@@ -15,7 +15,8 @@ winit = "0.24"
 glace = { path = "../glace" }
 byteorder = "1"
 raw-gl-context = "0.1.2"
+bincode = "1"
 
 [build-dependencies]
-spirv-builder = { git = "https://github.com/EmbarkStudios/rust-gpu.git", rev = "f09a5f6e65dd54ef1b825d1bd3987da089c89cd9" } # must be git ref
+spirv-builder = { git = "https://github.com/EmbarkStudios/rust-gpu.git", rev = "4395b84114115752df2829c23109bb6c5048f4ec" } # must be git ref
 anyhow = "1"

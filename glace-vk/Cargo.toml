@@ -18,6 +18,5 @@ glace = { path = "../glace" }
 image = "0.23"
 
 [build-dependencies]
-spirv-builder = { git = "https://github.com/EmbarkStudios/rust-gpu.git", rev = "908487ae1dcbc0a3bf119294a4f12dd7bc87c218" } # must be git ref
+spirv-builder = { path = "../../rust-gpu/crates/spirv-builder" }
 anyhow = "1"
-

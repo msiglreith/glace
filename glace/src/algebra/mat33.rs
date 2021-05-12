@@ -1,4 +1,4 @@
-use super::{Vec3};
+use super::Vec3;
 use core::ops::Mul;
 
 #[derive(Debug, Copy, Clone)]

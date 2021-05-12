@@ -33,7 +33,11 @@ impl QuadMonotonic1d {
         let a = self.p0 - 2.0 * self.p1 + self.p2;
 
         if a.abs() < 0.0001 {
-            Line1d { p0: self.p0, p1: self.p2 }.raycast(p)
+            Line1d {
+                p0: self.p0,
+                p1: self.p2,
+            }
+            .raycast(p)
         } else {
             let b = self.p0 - self.p1;
             let c = self.p0 - p;

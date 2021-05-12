@@ -1,7 +1,8 @@
-use crate::{device::Device, instance::Instance};
-use ash::{extensions::khr, version::DeviceV1_0, vk};
+use crate::{device::Gpu, instance::Instance};
+use ash::{extensions::khr, prelude::*, version::DeviceV1_0, vk};
 
 pub struct Swapchain {
+    device_id: usize,
     pub swapchain_fn: khr::Swapchain,
     pub swapchain: vk::SwapchainKHR,
     pub surface_format: vk::SurfaceFormatKHR,
@@ -13,7 +14,7 @@ pub struct Swapchain {
 impl Swapchain {
     pub unsafe fn new(
         instance: &Instance,
-        device: &Device,
+        device: &Gpu,
         width: u32,
         height: u32,
     ) -> anyhow::Result<Self> {
@@ -96,6 +97,7 @@ impl Swapchain {
         };
 
         Ok(Swapchain {
+            device_id: instance.device_id,
             swapchain,
             swapchain_fn,
             surface_format,
@@ -103,5 +105,32 @@ impl Swapchain {
             frame_semaphores,
             frame_rtvs,
         })
+    }
+
+    pub unsafe fn acquire(&mut self) -> VkResult<usize> {
+        let mut index = 0;
+        let desc = vk::AcquireNextImageInfoKHR::builder()
+            .swapchain(self.swapchain)
+            .timeout(!0)
+            .fence(vk::Fence::null())
+            .semaphore(self.acquire_semaphore)
+            .device_mask(1u32 << self.device_id)
+            .build();
+        let result = self.swapchain_fn.fp().acquire_next_image2_khr(
+            self.swapchain_fn.device(),
+            &desc,
+            &mut index,
+        );
+        let index = match result {
+            vk::Result::SUCCESS | vk::Result::SUBOPTIMAL_KHR => index as usize,
+            _ => return VkResult::Err(result),
+        };
+
+        std::mem::swap(
+            &mut self.frame_semaphores[index],
+            &mut self.acquire_semaphore,
+        );
+
+        VkResult::Ok(index)
     }
 }

@@ -11,6 +11,7 @@ fn main() -> anyhow::Result<()> {
         .next()
         .and_then(|path| path.parent())
         .unwrap();
+    println!("cargo:rerun-if-changed=shader");
     println!("cargo:rustc-env=spv={}", directory.to_str().unwrap());
     Ok(())
 }

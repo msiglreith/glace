@@ -24,13 +24,13 @@ pub fn main_fs(
     f_position_world: f32x3,
     output: &mut f32x4,
     #[spirv(uniform, binding = 0)] u_locals_fs: &LocalsPbr,
-    #[spirv(uniform_constant, binding = 0)] u_albedo: &SampledImage<Image2d>,
-    #[spirv(uniform_constant, binding = 1)] u_normals: &SampledImage<Image2d>,
-    #[spirv(uniform_constant, binding = 2)] u_metal_roughness: &SampledImage<Image2d>,
-    #[spirv(uniform_constant, binding = 3)] u_ambient_occlusion: &SampledImage<Image2d>,
-    #[spirv(uniform_constant, binding = 4)] u_diffuse_map: &SampledImage<Cubemap>,
-    #[spirv(uniform_constant, binding = 5)] u_specular_map: &SampledImage<Cubemap>,
-    #[spirv(uniform_constant, binding = 6)] u_lut_ggx: &SampledImage<Image2d>,
+    #[spirv(binding = 0)] u_albedo: &SampledImage<Image2d>,
+    #[spirv(binding = 1)] u_normals: &SampledImage<Image2d>,
+    #[spirv(binding = 2)] u_metal_roughness: &SampledImage<Image2d>,
+    #[spirv(binding = 3)] u_ambient_occlusion: &SampledImage<Image2d>,
+    #[spirv(binding = 4)] u_diffuse_map: &SampledImage<Cubemap>,
+    #[spirv(binding = 5)] u_specular_map: &SampledImage<Cubemap>,
+    #[spirv(binding = 6)] u_lut_ggx: &SampledImage<Image2d>,
 ) {
     let normal = vec3(f_normal_world.x, f_normal_world.y, f_normal_world.z).normalize();
     let tangent = vec3(f_tangent_world.x, f_tangent_world.y, f_tangent_world.z).normalize();

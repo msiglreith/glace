@@ -1,9 +1,16 @@
-use spirv_builder::{MemoryModel, SpirvBuilder};
+use spirv_builder::SpirvBuilder;
 
 fn main() -> anyhow::Result<()> {
-    SpirvBuilder::new("shader")
-        .spirv_version(1, 5)
-        .memory_model(MemoryModel::Vulkan)
-        .build()?;
+    let result = SpirvBuilder::new("shader", "spirv-unknown-spv1.5")
+        .print_metadata(false)
+        .bindless(true)
+        .build_multimodule()?;
+    let directory = result
+        .values()
+        .next()
+        .and_then(|path| path.parent())
+        .unwrap();
+    println!("cargo:rerun-if-changed=shader");
+    println!("cargo:rustc-env=spv={}", directory.to_str().unwrap());
     Ok(())
 }

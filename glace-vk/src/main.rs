@@ -1,7 +1,4 @@
-use ash::{
-    version::{DeviceV1_0, DeviceV1_2},
-    vk,
-};
+use ash::{version::DeviceV1_0, vk};
 use camera::{Camera, InputMap};
 use glace::{f32x4x4, vec3};
 use gpu_allocator::AllocationCreateDesc;
@@ -49,8 +46,16 @@ fn main() -> anyhow::Result<()> {
 
     unsafe {
         let instance = instance::Instance::new(&window)?;
-        let mut device = device::Device::new(&instance)?;
-        let mut wsi = swapchain::Swapchain::new(&instance, &device, size.width, size.height)?;
+        let mut gpu = device::Gpu::new(
+            &instance,
+            frames_in_flight,
+            device::Descriptors {
+                buffers: 1024,
+                images: 1024,
+                samplers: 128,
+            },
+        )?;
+        let mut wsi = swapchain::Swapchain::new(&instance, &gpu, size.width, size.height)?;
 
         let directory = Path::new("assets");
 
@@ -61,19 +66,19 @@ fn main() -> anyhow::Result<()> {
             let desc = vk::BufferCreateInfo::builder()
                 .size(bin.len() as _)
                 .usage(vk::BufferUsageFlags::TRANSFER_SRC);
-            let buffer = device.create_buffer(&desc, None)?;
+            let buffer = gpu.create_buffer(&desc, None)?;
             let alloc_desc = AllocationCreateDesc {
                 name: "Triangle Buffer (CPU)",
-                requirements: device.get_buffer_memory_requirements(buffer),
+                requirements: gpu.get_buffer_memory_requirements(buffer),
                 location: gpu_allocator::MemoryLocation::CpuToGpu,
                 linear: true,
             };
-            let mut allocation = device.allocator.allocate(&alloc_desc)?;
+            let mut allocation = gpu.allocator.allocate(&alloc_desc)?;
             {
                 let mapping = allocation.mapped_slice_mut().unwrap();
                 mapping[..bin.len()].copy_from_slice(as_u8_slice(&bin));
             }
-            device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
+            gpu.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
             buffer
         };
 
@@ -83,57 +88,37 @@ fn main() -> anyhow::Result<()> {
                     | vk::BufferUsageFlags::INDEX_BUFFER
                     | vk::BufferUsageFlags::TRANSFER_DST,
             );
-            let buffer = device.create_buffer(&desc, None)?;
+            let buffer = gpu.create_buffer(&desc, None)?;
             let alloc_desc = AllocationCreateDesc {
                 name: "Triangle Buffer (GPU)",
-                requirements: device.get_buffer_memory_requirements(buffer),
+                requirements: gpu.get_buffer_memory_requirements(buffer),
                 location: gpu_allocator::MemoryLocation::GpuOnly,
                 linear: true,
             };
-            let allocation = device.allocator.allocate(&alloc_desc)?;
-            device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
+            let allocation = gpu.allocator.allocate(&alloc_desc)?;
+            gpu.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
             buffer
         };
 
         let locals_pbr_gpu = {
             let desc = vk::BufferCreateInfo::builder()
                 .size(mem::size_of::<LocalsPbr>() as _)
-                .usage(vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST);
-            let buffer = device.create_buffer(&desc, None)?;
+                .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST);
+            let buffer = gpu.create_buffer(&desc, None)?;
             let alloc_desc = AllocationCreateDesc {
                 name: "Locals PBR (GPU)",
-                requirements: device.get_buffer_memory_requirements(buffer),
+                requirements: gpu.get_buffer_memory_requirements(buffer),
                 location: gpu_allocator::MemoryLocation::GpuOnly,
                 linear: true,
             };
-            let allocation = device.allocator.allocate(&alloc_desc)?;
-            device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
+            let allocation = gpu.allocator.allocate(&alloc_desc)?;
+            gpu.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
             buffer
         };
 
-        let upload_pool = {
-            let desc =
-                vk::CommandPoolCreateInfo::builder().queue_family_index(instance.family_index);
-            device.create_command_pool(&desc, None)?
-        };
-        let upload_cmd_buffer = {
-            let desc = vk::CommandBufferAllocateInfo::builder()
-                .command_pool(upload_pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_buffer_count(1);
-            device.allocate_command_buffers(&desc)?[0]
-        };
+        let upload_cmd_buffer = gpu.acquire_cmd_buffer().unwrap();
 
-        device
-            .begin_command_buffer(
-                upload_cmd_buffer,
-                &vk::CommandBufferBeginInfo::builder()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
-                    .build(),
-            )
-            .unwrap();
-
-        device.cmd_copy_buffer(
+        gpu.cmd_copy_buffer(
             upload_cmd_buffer,
             mesh_cpu,
             mesh_gpu,
@@ -146,7 +131,7 @@ fn main() -> anyhow::Result<()> {
 
         let mut load_png = |name: &str,
                             format: vk::Format,
-                            downsample: bool|
+                            _downsample: bool|
          -> anyhow::Result<(vk::Image, vk::ImageView, vk::Buffer)> {
             let path = directory.join(name);
             let img = image::open(&Path::new(&path)).unwrap().to_rgba8();
@@ -168,34 +153,34 @@ fn main() -> anyhow::Result<()> {
                 .tiling(vk::ImageTiling::OPTIMAL)
                 .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST);
 
-            let image = device.create_image(&desc, None)?;
+            let image = gpu.create_image(&desc, None)?;
             let alloc_desc = AllocationCreateDesc {
                 name,
-                requirements: device.get_image_memory_requirements(image),
+                requirements: gpu.get_image_memory_requirements(image),
                 location: gpu_allocator::MemoryLocation::GpuOnly,
                 linear: false,
             };
-            let allocation = device.allocator.allocate(&alloc_desc)?;
-            device.bind_image_memory(image, allocation.memory(), allocation.offset())?;
+            let allocation = gpu.allocator.allocate(&alloc_desc)?;
+            gpu.bind_image_memory(image, allocation.memory(), allocation.offset())?;
 
             let desc = vk::BufferCreateInfo::builder()
                 .size(img_data.len() as _)
                 .usage(vk::BufferUsageFlags::TRANSFER_SRC);
-            let buffer = device.create_buffer(&desc, None)?;
+            let buffer = gpu.create_buffer(&desc, None)?;
             let alloc_desc = AllocationCreateDesc {
                 name,
-                requirements: device.get_buffer_memory_requirements(buffer),
+                requirements: gpu.get_buffer_memory_requirements(buffer),
                 location: gpu_allocator::MemoryLocation::CpuToGpu,
                 linear: true,
             };
-            let mut allocation = device.allocator.allocate(&alloc_desc)?;
+            let mut allocation = gpu.allocator.allocate(&alloc_desc)?;
             {
                 let mapping = allocation.mapped_slice_mut().unwrap();
                 mapping[..img_data.len()].copy_from_slice(as_u8_slice(&img_data));
             }
-            device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
+            gpu.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
 
-            let pre_transfer_barrier = [vk::ImageMemoryBarrier::builder()
+            let pre_transfer_barrier = [vk::ImageMemoryBarrier2KHR::builder()
                 .image(image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -204,18 +189,18 @@ fn main() -> anyhow::Result<()> {
                     base_array_layer: 0,
                     layer_count: 1,
                 })
+                .src_access_mask(vk::AccessFlags2KHR::ACCESS_2_NONE)
+                .src_stage_mask(vk::PipelineStageFlags2KHR::PIPELINE_STAGE_2_NONE)
+                .dst_access_mask(vk::AccessFlags2KHR::ACCESS_2_MEMORY_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2KHR::PIPELINE_STAGE_2_COPY)
+                .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                 .build()];
 
-            device.cmd_pipeline_barrier(
-                upload_cmd_buffer,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &pre_transfer_barrier,
-            );
+            let pre_transfer_dep =
+                vk::DependencyInfoKHR::builder().image_memory_barriers(&pre_transfer_barrier);
+            gpu.ext_sync2
+                .cmd_pipeline_barrier2(upload_cmd_buffer, &pre_transfer_dep);
 
             let copy = vk::BufferImageCopy {
                 buffer_offset: 0,
@@ -235,7 +220,7 @@ fn main() -> anyhow::Result<()> {
                 image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
             };
 
-            device.cmd_copy_buffer_to_image(
+            gpu.cmd_copy_buffer_to_image(
                 upload_cmd_buffer,
                 buffer,
                 image,
@@ -255,7 +240,7 @@ fn main() -> anyhow::Result<()> {
                 .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                 .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .build()];
-            device.cmd_pipeline_barrier(
+            gpu.cmd_pipeline_barrier(
                 upload_cmd_buffer,
                 vk::PipelineStageFlags::TOP_OF_PIPE,
                 vk::PipelineStageFlags::BOTTOM_OF_PIPE,
@@ -278,7 +263,7 @@ fn main() -> anyhow::Result<()> {
                         layer_count: 1,
                     });
 
-                device.create_image_view(&desc, None)?
+                gpu.create_image_view(&desc, None)?
             };
 
             Ok((image, view, buffer))
@@ -289,12 +274,12 @@ fn main() -> anyhow::Result<()> {
         let (normal, normal_view, normal_buffer) =
             load_png("SciFiHelmet_Normal.png", vk::Format::R8G8B8A8_UNORM, true)?;
 
-        device.end_command_buffer(upload_cmd_buffer)?;
+        gpu.end_command_buffer(upload_cmd_buffer)?;
         let upload_buffers = [upload_cmd_buffer];
         let upload_submit = vk::SubmitInfo::builder()
             .command_buffers(&upload_buffers)
             .build();
-        device.queue_submit(device.queue, &[upload_submit], vk::Fence::null())?;
+        gpu.queue_submit(gpu.queue, &[upload_submit], vk::Fence::null())?;
 
         let depth_stencil_format = vk::Format::D32_SFLOAT;
         let depth_stencil_image = {
@@ -312,15 +297,15 @@ fn main() -> anyhow::Result<()> {
                 .tiling(vk::ImageTiling::OPTIMAL)
                 .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT);
 
-            let image = device.create_image(&desc, None)?;
+            let image = gpu.create_image(&desc, None)?;
             let alloc_desc = AllocationCreateDesc {
                 name: "Depth Buffer",
-                requirements: device.get_image_memory_requirements(image),
+                requirements: gpu.get_image_memory_requirements(image),
                 location: gpu_allocator::MemoryLocation::GpuOnly,
                 linear: false,
             };
-            let allocation = device.allocator.allocate(&alloc_desc)?;
-            device.bind_image_memory(image, allocation.memory(), allocation.offset())?;
+            let allocation = gpu.allocator.allocate(&alloc_desc)?;
+            gpu.bind_image_memory(image, allocation.memory(), allocation.offset())?;
             image
         };
 
@@ -336,7 +321,7 @@ fn main() -> anyhow::Result<()> {
                     base_array_layer: 0,
                     layer_count: 1,
                 });
-            device.create_image_view(&view_desc, None)?
+            gpu.create_image_view(&view_desc, None)?
         };
 
         let mesh_pass = {
@@ -374,7 +359,7 @@ fn main() -> anyhow::Result<()> {
             let desc = vk::RenderPassCreateInfo::builder()
                 .attachments(&attachments)
                 .subpasses(&subpasses);
-            device.create_render_pass(&desc, None)?
+            gpu.create_render_pass(&desc, None)?
         };
 
         let mesh_fbo = {
@@ -406,69 +391,17 @@ fn main() -> anyhow::Result<()> {
                 .layers(1)
                 .push_next(&mut attachments);
             desc.attachment_count = images.len() as _;
-            device.create_framebuffer(&desc, None)?
+            gpu.create_framebuffer(&desc, None)?
         };
 
         let mesh_sampler = {
             let desc = vk::SamplerCreateInfo::builder(); // TODO: linear
-            device.create_sampler(&desc, None)?
+            gpu.create_sampler(&desc, None)?
         };
 
-        let mesh_set_layout = {
-            let sampler = [mesh_sampler];
-            let bindings = [
-                vk::DescriptorSetLayoutBinding::builder()
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .binding(0)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::ALL)
-                    .build(),
-                vk::DescriptorSetLayoutBinding::builder()
-                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                    .binding(1)
-                    .descriptor_count(2)
-                    .stage_flags(vk::ShaderStageFlags::ALL)
-                    .build(),
-                vk::DescriptorSetLayoutBinding::builder()
-                    .descriptor_type(vk::DescriptorType::SAMPLER)
-                    .binding(2)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::ALL)
-                    .immutable_samplers(&sampler)
-                    .build(),
-            ];
-            let desc = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
-            device.create_descriptor_set_layout(&desc, None)?
-        };
+        let mesh_layout = gpu.create_layout(&[mesh_sampler], 4)?;
 
-        let mesh_layout = {
-            let set_layouts = [mesh_set_layout];
-            let desc = vk::PipelineLayoutCreateInfo::builder().set_layouts(&set_layouts);
-            device.create_pipeline_layout(&desc, None)?
-        };
-
-        let mesh_set = {
-            let pool_sizes = [
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: 1,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::SAMPLED_IMAGE,
-                    descriptor_count: 2,
-                },
-            ];
-            let desc = vk::DescriptorPoolCreateInfo::builder()
-                .max_sets(2)
-                .pool_sizes(&pool_sizes);
-            let pool = device.create_descriptor_pool(&desc, None)?;
-
-            let layouts = [mesh_set_layout];
-            let desc = vk::DescriptorSetAllocateInfo::builder()
-                .set_layouts(&layouts)
-                .descriptor_pool(pool);
-            let set = device.allocate_descriptor_sets(&desc)?;
-
+        {
             let buffer_info = [vk::DescriptorBufferInfo {
                 buffer: locals_pbr_gpu,
                 offset: 0,
@@ -486,39 +419,40 @@ fn main() -> anyhow::Result<()> {
                     image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 },
             ];
-            device.update_descriptor_sets(
+            gpu.update_descriptor_sets(
                 &[
                     vk::WriteDescriptorSet::builder()
-                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                        .dst_set(set[0])
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .dst_set(gpu.buffers.set)
                         .dst_binding(0)
                         .buffer_info(&buffer_info)
                         .build(),
                     vk::WriteDescriptorSet::builder()
                         .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                        .dst_set(set[0])
-                        .dst_binding(1)
+                        .dst_set(gpu.sampled_images.set)
+                        .dst_binding(0)
                         .image_info(&image_info)
                         .build(),
                 ],
                 &[],
             );
+        }
 
-            set
-        };
+        let spirv_dir = Path::new(env!("spv"));
 
         let shader = {
-            let mut spirv = std::io::Cursor::new(include_bytes!(env!("shader.spv")));
-            let code = ash::util::read_spv(&mut spirv)?;
+            let mut file = std::io::Cursor::new(std::fs::read(spirv_dir.join("mesh_vs"))?);
+            // let mut file = File::open("out.spv" /*directory.join("triangle.vert.spv")*/)?;
+            let code = ash::util::read_spv(&mut file)?;
             let desc = vk::ShaderModuleCreateInfo::builder().code(&code);
-            device.create_shader_module(&desc, None)?
+            gpu.create_shader_module(&desc, None)?
         };
 
         let mesh_fs = {
             let mut file = File::open(directory.join("triangle.frag.spv"))?;
             let code = ash::util::read_spv(&mut file)?;
             let desc = vk::ShaderModuleCreateInfo::builder().code(&code);
-            device.create_shader_module(&desc, None)?
+            gpu.create_shader_module(&desc, None)?
         };
 
         let mesh_pipeline = {
@@ -636,18 +570,17 @@ fn main() -> anyhow::Result<()> {
                 .dynamic_state(&dynamic_desc)
                 .render_pass(mesh_pass)
                 .subpass(0)
-                .layout(mesh_layout)
+                .layout(mesh_layout.pipeline_layout)
                 .build(); // TODO
 
-            device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[desc], None)
+            gpu.create_graphics_pipelines(vk::PipelineCache::null(), &[desc], None)
                 .unwrap()
         };
 
         let render_semaphores = (0..frames_in_flight)
             .map(|_| {
                 let desc = vk::SemaphoreCreateInfo::builder();
-                device.create_semaphore(&desc, None)
+                gpu.create_semaphore(&desc, None)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -678,57 +611,13 @@ fn main() -> anyhow::Result<()> {
                     _ => (),
                 },
                 Event::MainEventsCleared => {
+                    let frame_local = frame_index % frames_in_flight;
+
                     camera.update(&input);
                     input.reset_delta();
 
-                    let image_index = {
-                        let mut index = 0;
-                        let desc = vk::AcquireNextImageInfoKHR::builder()
-                            .swapchain(wsi.swapchain)
-                            .timeout(!0)
-                            .fence(vk::Fence::null())
-                            .semaphore(wsi.acquire_semaphore)
-                            .device_mask(1u32 << instance.device_id)
-                            .build();
-                        let result = wsi.swapchain_fn.fp().acquire_next_image2_khr(
-                            device.handle(),
-                            &desc,
-                            &mut index,
-                        );
-                        match result {
-                            vk::Result::SUCCESS | vk::Result::SUBOPTIMAL_KHR => index as usize,
-                            _ => return,
-                        }
-                    };
-
-                    std::mem::swap(
-                        &mut wsi.frame_semaphores[image_index],
-                        &mut wsi.acquire_semaphore,
-                    );
-
-                    let frame_local = frame_index % frames_in_flight;
-
-                    if frame_index >= frames_in_flight {
-                        let semaphores = [device.timeline];
-                        let wait_values = [(frame_index - frames_in_flight + 1) as u64];
-                        let wait_info = vk::SemaphoreWaitInfo::builder()
-                            .semaphores(&semaphores)
-                            .values(&wait_values);
-                        device.wait_semaphores(&wait_info, !0).unwrap();
-                        device
-                            .reset_command_pool(
-                                device.cmd_pools[frame_local],
-                                vk::CommandPoolResetFlags::empty(),
-                            )
-                            .unwrap();
-                    }
-
-                    let begin_desc = vk::CommandBufferBeginInfo::builder()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-                    let main_cmd_buffer = device.cmd_buffers[frame_local];
-                    device
-                        .begin_command_buffer(main_cmd_buffer, &begin_desc)
-                        .unwrap();
+                    let image_index = wsi.acquire().unwrap();
+                    let main_cmd_buffer = gpu.acquire_cmd_buffer().unwrap();
 
                     let size = window.inner_size();
                     let aspect = size.width as f32 / size.height as f32;
@@ -745,12 +634,29 @@ fn main() -> anyhow::Result<()> {
                             10000.0,
                         ),
                     };
-                    device.cmd_update_buffer(
+                    gpu.cmd_update_buffer(
                         main_cmd_buffer,
                         locals_pbr_gpu,
                         0,
                         as_u8_slice(&[locals]),
                     );
+
+                    let mem_barrier = [vk::MemoryBarrier2KHR::builder()
+                        .src_access_mask(
+                            vk::AccessFlags2KHR::ACCESS_2_MEMORY_READ
+                                | vk::AccessFlags2KHR::ACCESS_2_MEMORY_WRITE,
+                        )
+                        .dst_access_mask(
+                            vk::AccessFlags2KHR::ACCESS_2_MEMORY_READ
+                                | vk::AccessFlags2KHR::ACCESS_2_MEMORY_WRITE,
+                        )
+                        .src_stage_mask(vk::PipelineStageFlags2KHR::PIPELINE_STAGE_2_ALL_COMMANDS)
+                        .dst_stage_mask(vk::PipelineStageFlags2KHR::PIPELINE_STAGE_2_ALL_COMMANDS)
+                        .build()];
+                    let full_barrier_dep =
+                        vk::DependencyInfoKHR::builder().memory_barriers(&mem_barrier);
+                    gpu.ext_sync2
+                        .cmd_pipeline_barrier2(main_cmd_buffer, &full_barrier_dep);
 
                     let clear_values = [
                         vk::ClearValue {
@@ -781,14 +687,14 @@ fn main() -> anyhow::Result<()> {
                         })
                         .clear_values(&clear_values)
                         .push_next(&mut render_pass_attachments);
-                    device.cmd_begin_render_pass(
+                    gpu.cmd_begin_render_pass(
                         main_cmd_buffer,
                         &mesh_pass_begin_desc,
                         vk::SubpassContents::INLINE,
                     );
 
                     let base_offset = num_indices as u64 * 4;
-                    device.cmd_bind_vertex_buffers(
+                    gpu.cmd_bind_vertex_buffers(
                         main_cmd_buffer,
                         0,
                         &[mesh_gpu, mesh_gpu, mesh_gpu, mesh_gpu],
@@ -799,18 +705,13 @@ fn main() -> anyhow::Result<()> {
                             base_offset + 1_681_776,
                         ],
                     );
-                    device.cmd_bind_index_buffer(
-                        main_cmd_buffer,
-                        mesh_gpu,
-                        0,
-                        vk::IndexType::UINT32,
-                    );
-                    device.cmd_bind_pipeline(
+                    gpu.cmd_bind_index_buffer(main_cmd_buffer, mesh_gpu, 0, vk::IndexType::UINT32);
+                    gpu.cmd_bind_pipeline(
                         main_cmd_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
                         mesh_pipeline[0],
                     );
-                    device.cmd_set_scissor(
+                    gpu.cmd_set_scissor(
                         main_cmd_buffer,
                         0,
                         &[vk::Rect2D {
@@ -821,7 +722,7 @@ fn main() -> anyhow::Result<()> {
                             },
                         }],
                     );
-                    device.cmd_set_viewport(
+                    gpu.cmd_set_viewport(
                         main_cmd_buffer,
                         0,
                         &[vk::Viewport {
@@ -833,21 +734,25 @@ fn main() -> anyhow::Result<()> {
                             max_depth: 1.0,
                         }],
                     );
-                    device.cmd_bind_descriptor_sets(
+                    gpu.cmd_bind_descriptors(
                         main_cmd_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
                         mesh_layout,
-                        0,
-                        &mesh_set,
-                        &[],
                     );
-                    device.cmd_draw_indexed(main_cmd_buffer, num_indices as _, 1, 0, 0, 0);
-                    device.cmd_end_render_pass(main_cmd_buffer);
+                    gpu.cmd_push_constants(
+                        main_cmd_buffer,
+                        mesh_layout.pipeline_layout,
+                        vk::ShaderStageFlags::ALL,
+                        0,
+                        &[0, 0, 0, 0],
+                    );
+                    gpu.cmd_draw_indexed(main_cmd_buffer, num_indices as _, 1, 0, 0, 0);
+                    gpu.cmd_end_render_pass(main_cmd_buffer);
 
-                    device.end_command_buffer(main_cmd_buffer).unwrap();
+                    gpu.end_command_buffer(main_cmd_buffer).unwrap();
 
                     let main_waits = [wsi.frame_semaphores[image_index]];
-                    let main_signals = [device.timeline, render_semaphores[frame_local]];
+                    let main_signals = [gpu.timeline, render_semaphores[frame_local]];
                     let main_stages = [vk::PipelineStageFlags::BOTTOM_OF_PIPE]; // TODO
                     let main_buffers = [main_cmd_buffer];
 
@@ -863,8 +768,7 @@ fn main() -> anyhow::Result<()> {
                         .command_buffers(&main_buffers)
                         .push_next(&mut timeline_submit)
                         .build();
-                    device
-                        .queue_submit(device.queue, &[main_submit], vk::Fence::null())
+                    gpu.queue_submit(gpu.queue, &[main_submit], vk::Fence::null())
                         .unwrap();
 
                     let present_wait = [render_semaphores[frame_local]];
@@ -875,7 +779,7 @@ fn main() -> anyhow::Result<()> {
                         .swapchains(&present_swapchains)
                         .image_indices(&present_images);
                     wsi.swapchain_fn
-                        .queue_present(device.queue, &present_info)
+                        .queue_present(gpu.queue, &present_info)
                         .unwrap();
 
                     frame_index += 1;

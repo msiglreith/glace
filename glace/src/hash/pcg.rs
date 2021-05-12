@@ -31,7 +31,12 @@ pub fn pcg3d(mut v: u32x3) -> u32x3 {
     v.x = v.x.wrapping_add(v.y.wrapping_mul(v.z));
     v.y = v.y.wrapping_add(v.z.wrapping_mul(v.x));
     v.z = v.z.wrapping_add(v.x.wrapping_mul(v.y));
-    v = v ^ (v >> u32x3 { x: 16u32, y: 16u32, z: 16u32 });
+    v = v
+        ^ (v >> u32x3 {
+            x: 16u32,
+            y: 16u32,
+            z: 16u32,
+        });
     v.x = v.x.wrapping_add(v.y.wrapping_mul(v.z));
     v.y = v.y.wrapping_add(v.z.wrapping_mul(v.x));
     v.z = v.z.wrapping_add(v.x.wrapping_mul(v.y));

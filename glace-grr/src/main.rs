@@ -36,6 +36,14 @@ fn max_mip_levels_2d(width: u32, height: u32) -> u32 {
     (width.max(height) as f32).log2() as u32 + 1
 }
 
+pub struct FrameTime(pub f32);
+
+impl FrameTime {
+    pub fn update(&mut self, t: f32) {
+        self.0 = self.0 * 0.95 + 0.05 * t;
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     unsafe {
         let event_loop = EventLoop::new();
@@ -43,6 +51,7 @@ fn main() -> anyhow::Result<()> {
         let window = WindowBuilder::new()
             .with_title("grr :: triangle")
             .with_inner_size(LogicalSize::new(1024.0, 768.0))
+            .with_visible(false)
             .build(&event_loop)?;
 
         let context = GlContext::create(
@@ -69,7 +78,7 @@ fn main() -> anyhow::Result<()> {
         let grr = grr::Device::new(
             |symbol| context.get_proc_address(symbol) as *const _,
             grr::Debug::Enable {
-                callback: |report, _, _, _, msg| {
+                callback: |_report, _, _, _, _msg| {
                     // println!("{:?}: {:?}", report, msg);
                 },
                 flags: grr::DebugReport::FULL,
@@ -77,6 +86,55 @@ fn main() -> anyhow::Result<()> {
         );
 
         let directory = Path::new("assets");
+
+        let omega = {
+            let data = std::fs::read(directory.join("omega.bin"))?;
+            grr.create_buffer_from_host(&data, grr::MemoryFlags::DEVICE_LOCAL)?
+        };
+        let _spectrum = {
+            let data = std::fs::read(directory.join("spectrum.bin"))?;
+            grr.create_buffer_from_host(&data, grr::MemoryFlags::DEVICE_LOCAL)?
+        };
+
+        let _spectrum_image = {
+            let texture = grr.create_image(
+                grr::ImageType::D2 {
+                    width: 512,
+                    height: 512,
+                    layers: 1,
+                    samples: 1,
+                },
+                grr::Format::R32G32_SFLOAT,
+                1,
+            )?;
+
+            grr.copy_buffer_to_image(
+                omega,
+                texture,
+                grr::BufferImageCopy {
+                    buffer_offset: 0,
+                    buffer_layout: grr::MemoryLayout {
+                        base_format: grr::BaseFormat::RG,
+                        format_layout: grr::FormatLayout::F32,
+                        row_length: 512,
+                        image_height: 512,
+                        alignment: 4,
+                    },
+                    image_subresource: grr::SubresourceLayers {
+                        level: 0,
+                        layers: 0..1,
+                    },
+                    image_offset: grr::Offset { x: 0, y: 0, z: 0 },
+                    image_extent: grr::Extent {
+                        width: 512,
+                        height: 512,
+                        depth: 1,
+                    },
+                },
+            );
+
+            texture
+        };
 
         let load_png =
             |name: &str, format: grr::Format, downsample: bool| -> anyhow::Result<grr::Image> {
@@ -203,6 +261,8 @@ fn main() -> anyhow::Result<()> {
 
         let spirv_dir = Path::new(env!("spv"));
 
+        println!("gr :: compile debug");
+
         let debug_quad_vs = grr.create_shader(
             grr::ShaderStage::Vertex,
             grr::ShaderSource::Spirv {
@@ -216,7 +276,7 @@ fn main() -> anyhow::Result<()> {
             grr::ShaderSource::Spirv {
                 entrypoint: "debug::quad_fs",
             },
-            &std::fs::read(spirv_dir.join("debugquad_fs"))?,
+            &std::fs::read("debug_fs.spv")?, //spirv_dir.join("debugquad_fs"))?,
             grr::ShaderFlags::VERBOSE,
         )?;
 
@@ -233,6 +293,8 @@ fn main() -> anyhow::Result<()> {
 
         let debug_quad_indices =
             grr.create_buffer_from_host(&[0u8, 1, 2, 2, 1, 3], grr::MemoryFlags::DEVICE_LOCAL)?;
+
+        println!("gr :: compile pbr");
 
         let pbr_vs = grr.create_shader(
             grr::ShaderStage::Vertex,
@@ -271,6 +333,8 @@ fn main() -> anyhow::Result<()> {
             stencil_back: grr::StencilFace::KEEP,
         };
 
+        println!("gr :: compile skybox");
+
         let skybox_vs = grr.create_shader(
             grr::ShaderStage::Vertex,
             grr::ShaderSource::Spirv {
@@ -307,6 +371,32 @@ fn main() -> anyhow::Result<()> {
             stencil_front: grr::StencilFace::KEEP,
             stencil_back: grr::StencilFace::KEEP,
         };
+
+        println!("gr :: compile fft");
+
+        let fft_row_cs = grr.create_shader(
+            grr::ShaderStage::Compute,
+            grr::ShaderSource::Spirv {
+                entrypoint: "fft_row",
+            },
+            &std::fs::read("out.spv")?, // spirv_dir.join("fft_row"))?,
+            grr::ShaderFlags::VERBOSE,
+        )?;
+
+        let fft_row_pipeline =
+            grr.create_compute_pipeline(fft_row_cs, grr::PipelineFlags::VERBOSE)?;
+        let fft_spectrum = grr.create_buffer(512 * 512 * 8, grr::MemoryFlags::DEVICE_LOCAL)?;
+
+        let fft_image = grr.create_image(
+            grr::ImageType::D2 {
+                width: 512,
+                height: 512,
+                layers: 1,
+                samples: 1,
+            },
+            grr::Format::R32G32_SFLOAT,
+            1,
+        )?;
 
         let specular = fs::read(directory.join("specular.ktx2"))?;
         let specular_raw = ktx::Image::new(&specular)?;
@@ -407,8 +497,16 @@ fn main() -> anyhow::Result<()> {
         let mut camera = Camera::new(vec3(0.0, 0.0, 0.0), 0.0, 0.0);
         let mut input = InputMap::new();
 
+        let query = [
+            grr.create_query(grr::QueryType::Timestamp),
+            grr.create_query(grr::QueryType::Timestamp),
+        ];
+        let mut avg_frametime_gpu = FrameTime(0.0);
+
+        window.set_visible(true);
+
         event_loop.run(move |event, _, control_flow| {
-            *control_flow = ControlFlow::Wait;
+            *control_flow = ControlFlow::Poll;
 
             match event {
                 Event::LoopDestroyed => return,
@@ -428,6 +526,11 @@ fn main() -> anyhow::Result<()> {
                 Event::MainEventsCleared => {
                     camera.update(&input);
                     input.reset_delta();
+
+                    window.set_title(&format!(
+                        "glace :: frame: gpu: {:.2} ms",
+                        avg_frametime_gpu.0 * 1000.0,
+                    ));
 
                     let size = window.inner_size();
                     let aspect = size.width as f32 / size.height as f32;
@@ -582,6 +685,54 @@ fn main() -> anyhow::Result<()> {
                         0,
                     );
 
+                    grr.copy_buffer_to_image(
+                        fft_spectrum,
+                        fft_image,
+                        grr::BufferImageCopy {
+                            buffer_offset: 0,
+                            buffer_layout: grr::MemoryLayout {
+                                base_format: grr::BaseFormat::RG,
+                                format_layout: grr::FormatLayout::F32,
+                                row_length: 512,
+                                image_height: 512,
+                                alignment: 4,
+                            },
+                            image_subresource: grr::SubresourceLayers {
+                                level: 0,
+                                layers: 0..1,
+                            },
+                            image_offset: grr::Offset { x: 0, y: 0, z: 0 },
+                            image_extent: grr::Extent {
+                                width: 512,
+                                height: 512,
+                                depth: 1,
+                            },
+                        },
+                    );
+
+                    grr.memory_barrier(grr::Barrier::ALL);
+
+                    grr.write_timestamp(query[0]);
+
+                    grr.bind_pipeline(fft_row_pipeline);
+                    grr.bind_storage_buffers(
+                        0,
+                        &[grr::BufferRange {
+                            buffer: fft_spectrum,
+                            offset: 0,
+                            size: 512 * 512 * 8,
+                        }],
+                    );
+                    grr.dispatch(1, 512, 1);
+                    grr.write_timestamp(query[1]);
+
+                    let t0 = grr.get_query_result_u64(query[0], grr::QueryResultFlags::WAIT);
+                    let t1 = grr.get_query_result_u64(query[1], grr::QueryResultFlags::WAIT);
+
+                    avg_frametime_gpu.update((t1 - t0) as f32 / 1_000_000_000.0f32);
+
+                    grr.memory_barrier(grr::Barrier::ALL);
+
                     // debug textures
                     grr.bind_pipeline(debug_quad_pipeline);
                     grr.bind_vertex_array(empty_array);
@@ -598,7 +749,7 @@ fn main() -> anyhow::Result<()> {
                             ],
                         );
                     }
-                    grr.bind_image_views(0, &[albedo.as_view()]);
+                    grr.bind_image_views(0, &[fft_image.as_view()]);
                     grr.bind_samplers(0, &[sampler]);
                     grr.draw_indexed(grr::Primitive::Triangles, grr::IndexTy::U8, 0..6, 0..1, 0);
 

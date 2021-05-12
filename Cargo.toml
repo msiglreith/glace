@@ -8,13 +8,14 @@ members = [
 ]
 
 [profile.release]
-incremental = true
-codegen-units = 256
+codegen-units = 32
 
 [profile.dev.build-override]
 opt-level = 3
 
 [profile.release.build-override]
 opt-level = 3
-incremental = true
-codegen-units = 256
+codegen-units = 32
+
+[patch.crates-io]
+ash = { path = "../ash/ash" }

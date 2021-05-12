@@ -6,7 +6,7 @@ mod ops;
 pub use crate::algebra::*;
 pub use crate::ops::*;
 
+pub mod bezier;
+pub mod geometry;
 pub mod hash;
 pub mod sdf;
-pub mod geometry;
-pub mod bezier;

@@ -33,6 +33,7 @@ pub fn quad_vs(
     #[spirv(vertex_id)] vert_id: i32,
     a_uv: &mut f32x2,
     #[spirv(position)] a_position: &mut f32x4,
+    #[spirv(uniform_constant, binding = 0)] u_texture: &SampledImage<Image2d>,
     #[spirv(uniform_constant, binding = 1)] u_position: &f32x2,
     #[spirv(uniform_constant, binding = 2)] u_size: &f32x2,
 ) {
@@ -51,6 +52,8 @@ pub fn quad_fs(
     a_uv: f32x2,
     o_color: &mut f32x4,
     #[spirv(uniform_constant, binding = 0)] u_texture: &SampledImage<Image2d>,
+    #[spirv(uniform_constant, binding = 1)] u_position: &f32x2,
+    #[spirv(uniform_constant, binding = 2)] u_size: &f32x2,
 ) {
     *o_color = u_texture.sample(a_uv);
 }
