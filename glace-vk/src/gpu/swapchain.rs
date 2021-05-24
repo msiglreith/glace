@@ -1,4 +1,4 @@
-use crate::{device::Gpu, instance::Instance};
+use crate::gpu::{Gpu, Instance};
 use ash::{extensions::khr, prelude::*, version::DeviceV1_0, vk};
 
 pub struct Swapchain {

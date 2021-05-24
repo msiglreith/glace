@@ -1,24 +1,13 @@
-use crate::instance::Instance;
+use crate::gpu;
 use ash::{
     extensions::khr,
     version::{DeviceV1_0, DeviceV1_2, InstanceV1_0},
     vk,
 };
 use gpu_allocator::{VulkanAllocator, VulkanAllocatorCreateDesc};
+use glace::std::bindless::RenderResourceTag;
 
 const NUM_LAYOUTS: u32 = 64;
-
-#[derive(Debug, Copy, Clone)]
-pub struct Resource {
-    pub layout: vk::DescriptorSetLayout,
-    pub set: vk::DescriptorSet,
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct Layout {
-    pub pipeline_layout: vk::PipelineLayout,
-    pub samplers: Resource,
-}
 
 pub struct Gpu {
     pub device: ash::Device,
@@ -28,34 +17,40 @@ pub struct Gpu {
     pub cmd_buffers: Vec<vk::CommandBuffer>,
     pub timeline: vk::Semaphore,
     pub descriptor_pool: vk::DescriptorPool,
-    pub buffers: Resource,
-    pub sampled_images: Resource,
+    pub descriptors_buffer: gpu::Descriptors,
+    pub descriptors_image: gpu::Descriptors,
+    pub descriptors_accel: gpu::Descriptors,
     pub ext_sync2: khr::Synchronization2,
+    pub ext_accel_structure: khr::AccelerationStructure,
+    pub ext_deferred: khr::DeferredHostOperations,
     frame_id: usize,
 }
 
-pub struct Descriptors {
+pub struct DescriptorsDesc {
     pub buffers: usize,
     pub images: usize,
-    pub samplers: usize,
+    pub acceleration_structures: usize,
 }
 
 impl Gpu {
     pub unsafe fn new(
-        instance: &Instance,
+        instance: &gpu::Instance,
         frame_buffering: usize,
-        descriptors: Descriptors,
+        descriptors: DescriptorsDesc,
     ) -> anyhow::Result<Self> {
         let (device, queue) = {
             let device_extensions = vec![
                 khr::Swapchain::name().as_ptr(),
-                khr::Synchronization2::name().as_ptr(),
+                // khr::Synchronization2::name().as_ptr(),
+                khr::DeferredHostOperations::name().as_ptr(),
+                khr::AccelerationStructure::name().as_ptr(),
             ];
             let features = vk::PhysicalDeviceFeatures::builder();
             let mut features11 = vk::PhysicalDeviceVulkan11Features::builder()
                 .variable_pointers(true)
                 .variable_pointers_storage_buffer(true);
             let mut features12 = vk::PhysicalDeviceVulkan12Features::builder()
+                .buffer_device_address(true)
                 .imageless_framebuffer(true)
                 .descriptor_indexing(true)
                 .descriptor_binding_partially_bound(true)
@@ -65,6 +60,10 @@ impl Gpu {
                 .vulkan_memory_model(true);
             let mut features_sync2 =
                 vk::PhysicalDeviceSynchronization2FeaturesKHR::builder().synchronization2(true);
+            let mut features_ray_query =
+                vk::PhysicalDeviceRayQueryFeaturesKHR::builder().ray_query(true);
+            let mut features_accel_structure =
+                vk::PhysicalDeviceAccelerationStructureFeaturesKHR::builder().acceleration_structure(true);
 
             let queue_priorities = [1.0];
             let queue_descs = [vk::DeviceQueueCreateInfo::builder()
@@ -77,7 +76,9 @@ impl Gpu {
                 .enabled_features(&features)
                 .push_next(&mut features11)
                 .push_next(&mut features12)
-                .push_next(&mut features_sync2);
+                // .push_next(&mut features_sync2)
+                .push_next(&mut features_ray_query)
+                .push_next(&mut features_accel_structure);
 
             let device =
                 instance
@@ -87,6 +88,11 @@ impl Gpu {
 
             (device, queue)
         };
+
+        // extensions
+        let ext_sync2 = khr::Synchronization2::new(&instance.instance, &device);
+        let ext_accel_structure = khr::AccelerationStructure::new(&instance.instance, &device);
+        let ext_deferred = khr::DeferredHostOperations::new(&instance.instance, &device);
 
         let allocator = VulkanAllocator::new(&VulkanAllocatorCreateDesc {
             instance: instance.instance.clone(),
@@ -171,9 +177,27 @@ impl Gpu {
                 .push_next(&mut flag_desc);
             device.create_descriptor_set_layout(&desc, None)?
         };
+        let acceleration_structure_layout = {
+            let binding_flags = [vk::DescriptorBindingFlags::PARTIALLY_BOUND; 1];
+            let mut flag_desc = vk::DescriptorSetLayoutBindingFlagsCreateInfo::builder()
+                .binding_flags(&binding_flags);
+
+            let bindings = [vk::DescriptorSetLayoutBinding::builder()
+                .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                .binding(0)
+                .descriptor_count(descriptors.acceleration_structures as _)
+                .stage_flags(vk::ShaderStageFlags::ALL)
+                .build()];
+
+            let desc = vk::DescriptorSetLayoutCreateInfo::builder()
+                .bindings(&bindings)
+                .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+                .push_next(&mut flag_desc);
+            device.create_descriptor_set_layout(&desc, None)?
+        };
 
         let sets = {
-            let layouts = [buffer_layout, sampled_image_layout];
+            let layouts = [buffer_layout, sampled_image_layout, acceleration_structure_layout];
 
             let desc = vk::DescriptorSetAllocateInfo::builder()
                 .set_layouts(&layouts)
@@ -190,7 +214,23 @@ impl Gpu {
             device.create_semaphore(&desc, None)?
         };
 
-        let ext_sync2 = khr::Synchronization2::new(&instance.instance, &device);
+        let gpu_buffers = gpu::GpuDescriptors {
+            layout: buffer_layout,
+            set: sets[0],
+        };
+        let descriptors_buffer = gpu::Descriptors::new(RenderResourceTag::Buffer, descriptors.buffers, gpu_buffers);
+
+        let gpu_images = gpu::GpuDescriptors {
+            layout: sampled_image_layout,
+            set: sets[1],
+        };
+        let descriptors_image = gpu::Descriptors::new(RenderResourceTag::Texture, descriptors.images, gpu_images);
+
+        let gpu_accel = gpu::GpuDescriptors {
+            layout: acceleration_structure_layout,
+            set: sets[2],
+        };
+        let descriptors_accel = gpu::Descriptors::new(RenderResourceTag::Tlas, descriptors.acceleration_structures, gpu_accel);
 
         Ok(Self {
             device,
@@ -200,25 +240,53 @@ impl Gpu {
             cmd_buffers,
             timeline,
             descriptor_pool,
-            buffers: Resource {
-                layout: buffer_layout,
-                set: sets[0],
-            },
-            sampled_images: Resource {
-                layout: sampled_image_layout,
-                set: sets[1],
-            },
+            descriptors_buffer,
+            descriptors_image,
+            descriptors_accel,
             ext_sync2,
+            ext_accel_structure,
+            ext_deferred,
             frame_id: 0,
         })
     }
 
-    pub unsafe fn create_layout(&mut self, samplers: &[vk::Sampler], num_constants: u32) -> anyhow::Result<Layout> {
+    pub unsafe fn acceleration_structure_address(&self, acceleration_structure: gpu::AccelerationStructure) -> vk::DeviceAddress {
+        let desc = vk::AccelerationStructureDeviceAddressInfoKHR::builder().acceleration_structure(acceleration_structure);
+        self.ext_accel_structure.get_acceleration_structure_device_address(&desc)
+    }
+
+    pub unsafe fn buffer_address(&self, buffer: gpu::Buffer) -> vk::DeviceAddress {
+        let desc = vk::BufferDeviceAddressInfo::builder().buffer(buffer);
+        self.get_buffer_device_address(&desc)
+    }
+
+    pub unsafe fn create_buffer_gpu<T>(
+        &mut self,
+        name: &str,
+        len: usize,
+        usage: gpu::BufferUsageFlags,
+    ) -> anyhow::Result<gpu::Buffer> {
+        let size = std::mem::size_of::<T>() * len;
+        let desc = vk::BufferCreateInfo::builder().size(size as _).usage(usage);
+        let buffer = self.create_buffer(&desc, None)?;
+        let alloc_desc = gpu_allocator::AllocationCreateDesc {
+            name,
+            requirements: self.get_buffer_memory_requirements(buffer),
+            location: gpu_allocator::MemoryLocation::GpuOnly,
+            linear: true,
+        };
+        let allocation = self.allocator.allocate(&alloc_desc)?;
+        self.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
+        Ok(buffer)
+    }
+
+    pub unsafe fn create_layout(
+        &mut self,
+        samplers: &[vk::Sampler],
+        num_constants: u32,
+    ) -> anyhow::Result<gpu::Layout> {
         if samplers.is_empty() {
-            let set_layouts = [
-                self.buffers.layout,
-                self.sampled_images.layout,
-            ];
+            let set_layouts = [self.descriptors_buffer.gpu.layout, self.descriptors_image.gpu.layout];
             let push_constants = [vk::PushConstantRange::builder()
                 .offset(0)
                 .size(num_constants)
@@ -230,12 +298,12 @@ impl Gpu {
 
             let pipeline_layout = self.create_pipeline_layout(&desc, None)?;
 
-            Ok(Layout {
+            Ok(gpu::Layout {
                 pipeline_layout,
-                samplers: Resource {
+                samplers: gpu::GpuDescriptors {
                     layout: vk::DescriptorSetLayout::null(),
                     set: vk::DescriptorSet::null(),
-                }
+                },
             })
         } else {
             let sampler_layout = {
@@ -258,9 +326,9 @@ impl Gpu {
             let set = self.allocate_descriptor_sets(&desc)?;
 
             let set_layouts = [
-                self.buffers.layout,
-                self.sampled_images.layout,
-                sampler_layout
+                self.descriptors_buffer.gpu.layout,
+                self.descriptors_image.gpu.layout,
+                sampler_layout,
             ];
             let push_constants = [vk::PushConstantRange::builder()
                 .offset(0)
@@ -273,12 +341,12 @@ impl Gpu {
 
             let pipeline_layout = self.create_pipeline_layout(&desc, None)?;
 
-            Ok(Layout {
+            Ok(gpu::Layout {
                 pipeline_layout,
-                samplers: Resource {
+                samplers: gpu::GpuDescriptors {
                     layout: sampler_layout,
                     set: set[0],
-                }
+                },
             })
         }
     }
@@ -309,18 +377,116 @@ impl Gpu {
         Ok(cmd_buffer)
     }
 
+    pub unsafe fn update_descriptors(
+        &mut self,
+        buffers: &[gpu::BufferDescriptor],
+        images: &[gpu::ImageDescriptor],
+        accels: &[gpu::AccelerationStructureDescriptor],
+    ) {
+        let mut updates = Vec::new();
+
+        let mut buffer_infos = Vec::new();
+        for buffer in buffers {
+
+            buffer_infos.push(vk::DescriptorBufferInfo {
+                buffer: buffer.buffer,
+                offset: buffer.offset,
+                range: buffer.range,
+            });
+        }
+        for (i, buffer) in buffers.iter().enumerate() {
+            assert!(self.descriptors_buffer.is_valid(buffer.handle));
+            updates.push(
+                vk::WriteDescriptorSet::builder()
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .dst_set(self.descriptors_buffer.gpu.set)
+                    .dst_binding(0)
+                    .dst_array_element(buffer.handle.index())
+                    .buffer_info(&buffer_infos[i .. i+1])
+                    .build()
+            )
+        }
+
+        let mut image_infos = Vec::new();
+        for image in images {
+            image_infos.push(vk::DescriptorImageInfo {
+                sampler: vk::Sampler::null(),
+                    image_view: image.view,
+                    image_layout: image.layout,
+            });
+        }
+        for (i, image) in images.iter().enumerate() {
+            assert!(self.descriptors_image.is_valid(image.handle));
+            updates.push(
+                vk::WriteDescriptorSet::builder()
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .dst_set(self.descriptors_image.gpu.set)
+                    .dst_binding(0)
+                    .dst_array_element(image.handle.index())
+                    .image_info(&image_infos[i .. i + 1])
+                    .build(),
+            )
+        }
+
+        let mut accel_handles = Vec::new();
+        for accel in accels {
+            accel_handles.push(accel.acceleration_structure);
+        }
+        let mut accel_infos = Vec::new();
+        for (i, accel) in accels.iter().enumerate() {
+            accel_infos.push(vk::WriteDescriptorSetAccelerationStructureKHR::builder()
+                .acceleration_structures(&accel_handles[i .. i + 1]).build()
+            );
+        }
+        for (i, accel) in accels.iter().enumerate() {
+            assert!(self.descriptors_accel.is_valid(accel.handle));
+            let mut write = vk::WriteDescriptorSet::builder()
+                .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                .dst_set(self.descriptors_accel.gpu.set)
+                .dst_binding(0)
+                .dst_array_element(accel.handle.index())
+                .push_next(&mut accel_infos[i])
+                .build();
+            write.descriptor_count = 1;
+            updates.push(write);
+        }
+
+        self.update_descriptor_sets(
+            &updates,
+            &[],
+        );
+    }
+
     pub unsafe fn cmd_bind_descriptors(
         &mut self,
         cmd_buffer: vk::CommandBuffer,
         pipeline: vk::PipelineBindPoint,
-        layout: Layout,
+        layout: gpu::Layout,
     ) {
         if layout.samplers.layout == vk::DescriptorSetLayout::null() {
-            let sets = [self.buffers.set, self.sampled_images.set];
-            self.cmd_bind_descriptor_sets(cmd_buffer, pipeline, layout.pipeline_layout, 0, &sets, &[]);
+            let sets = [self.descriptors_buffer.gpu.set, self.descriptors_image.gpu.set];
+            self.cmd_bind_descriptor_sets(
+                cmd_buffer,
+                pipeline,
+                layout.pipeline_layout,
+                0,
+                &sets,
+                &[],
+            );
         } else {
-            let sets = [self.buffers.set, self.sampled_images.set, layout.samplers.set];
-            self.cmd_bind_descriptor_sets(cmd_buffer, pipeline, layout.pipeline_layout, 0, &sets, &[]);
+            let sets = [
+                self.descriptors_buffer.gpu.set,
+                self.descriptors_image.gpu.set,
+                layout.samplers.set,
+            ];
+            self.cmd_bind_descriptor_sets(
+                cmd_buffer,
+                pipeline,
+                layout.pipeline_layout,
+                0,
+                &sets,
+                &[],
+            );
         }
     }
 }

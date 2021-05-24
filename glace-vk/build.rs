@@ -1,8 +1,8 @@
-use spirv_builder::SpirvBuilder;
+use spirv_builder::{MetadataPrintout, SpirvBuilder};
 
 fn main() -> anyhow::Result<()> {
     let result = SpirvBuilder::new("shader", "spirv-unknown-spv1.5")
-        .print_metadata(false)
+        .print_metadata(MetadataPrintout::DependencyOnly)
         .bindless(true)
         .build_multimodule()?;
     let directory = result

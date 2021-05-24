@@ -6,7 +6,7 @@ use spirv_std::{scalar::Scalar, vector::Vector};
 use spirv_std::num_traits::Float;
 
 #[derive(Debug, Copy, Clone)]
-#[cfg_attr(target_arch = "spirv", repr(simd))]
+#[cfg_attr(target_arch = "spirv", spirv(vector))]
 pub struct Vec3<T> {
     pub x: T,
     pub y: T,
