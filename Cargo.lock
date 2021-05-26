@@ -569,6 +569,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "glacier"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ash",
+ "ash-window",
+ "byteorder",
+ "glace",
+ "gpu-allocator",
+ "image",
+ "winit",
+]
+
+[[package]]
 name = "gpu-allocator"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

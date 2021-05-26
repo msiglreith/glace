@@ -51,7 +51,6 @@ impl Gpu {
                 .variable_pointers_storage_buffer(true);
             let mut features12 = vk::PhysicalDeviceVulkan12Features::builder()
                 .buffer_device_address(true)
-                .imageless_framebuffer(true)
                 .descriptor_indexing(true)
                 .descriptor_binding_partially_bound(true)
                 .runtime_descriptor_array(true)
@@ -285,70 +284,49 @@ impl Gpu {
         samplers: &[vk::Sampler],
         num_constants: u32,
     ) -> anyhow::Result<gpu::Layout> {
-        if samplers.is_empty() {
-            let set_layouts = [self.descriptors_buffer.gpu.layout, self.descriptors_image.gpu.layout];
-            let push_constants = [vk::PushConstantRange::builder()
-                .offset(0)
-                .size(num_constants)
+        let sampler_layout = {
+            let bindings = [vk::DescriptorSetLayoutBinding::builder()
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .binding(0)
+                .descriptor_count(samplers.len() as _)
                 .stage_flags(vk::ShaderStageFlags::ALL)
+                .immutable_samplers(samplers)
                 .build()];
-            let desc = vk::PipelineLayoutCreateInfo::builder()
-                .set_layouts(&set_layouts)
-                .push_constant_ranges(&push_constants);
 
-            let pipeline_layout = self.create_pipeline_layout(&desc, None)?;
+            let desc = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
+            self.create_descriptor_set_layout(&desc, None)?
+        };
 
-            Ok(gpu::Layout {
-                pipeline_layout,
-                samplers: gpu::GpuDescriptors {
-                    layout: vk::DescriptorSetLayout::null(),
-                    set: vk::DescriptorSet::null(),
-                },
-            })
-        } else {
-            let sampler_layout = {
-                let bindings = [vk::DescriptorSetLayoutBinding::builder()
-                    .descriptor_type(vk::DescriptorType::SAMPLER)
-                    .binding(0)
-                    .descriptor_count(samplers.len() as _)
-                    .stage_flags(vk::ShaderStageFlags::ALL)
-                    .immutable_samplers(samplers)
-                    .build()];
+        let layouts = [sampler_layout];
+        let desc = vk::DescriptorSetAllocateInfo::builder()
+            .set_layouts(&layouts)
+            .descriptor_pool(self.descriptor_pool);
+        let set = self.allocate_descriptor_sets(&desc)?;
 
-                let desc = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
-                self.create_descriptor_set_layout(&desc, None)?
-            };
+        let set_layouts = [
+            self.descriptors_buffer.gpu.layout,
+            self.descriptors_image.gpu.layout,
+            sampler_layout,
+            self.descriptors_accel.gpu.layout,
+        ];
+        let push_constants = [vk::PushConstantRange::builder()
+            .offset(0)
+            .size(num_constants)
+            .stage_flags(vk::ShaderStageFlags::ALL)
+            .build()];
+        let desc = vk::PipelineLayoutCreateInfo::builder()
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(&push_constants);
 
-            let layouts = [sampler_layout];
-            let desc = vk::DescriptorSetAllocateInfo::builder()
-                .set_layouts(&layouts)
-                .descriptor_pool(self.descriptor_pool);
-            let set = self.allocate_descriptor_sets(&desc)?;
+        let pipeline_layout = self.create_pipeline_layout(&desc, None)?;
 
-            let set_layouts = [
-                self.descriptors_buffer.gpu.layout,
-                self.descriptors_image.gpu.layout,
-                sampler_layout,
-            ];
-            let push_constants = [vk::PushConstantRange::builder()
-                .offset(0)
-                .size(num_constants)
-                .stage_flags(vk::ShaderStageFlags::ALL)
-                .build()];
-            let desc = vk::PipelineLayoutCreateInfo::builder()
-                .set_layouts(&set_layouts)
-                .push_constant_ranges(&push_constants);
-
-            let pipeline_layout = self.create_pipeline_layout(&desc, None)?;
-
-            Ok(gpu::Layout {
-                pipeline_layout,
-                samplers: gpu::GpuDescriptors {
-                    layout: sampler_layout,
-                    set: set[0],
-                },
-            })
-        }
+        Ok(gpu::Layout {
+            pipeline_layout,
+            samplers: gpu::GpuDescriptors {
+                layout: sampler_layout,
+                set: set[0],
+            },
+        })
     }
 
     pub unsafe fn acquire_cmd_buffer(&mut self) -> anyhow::Result<vk::CommandBuffer> {
@@ -463,31 +441,20 @@ impl Gpu {
         pipeline: vk::PipelineBindPoint,
         layout: gpu::Layout,
     ) {
-        if layout.samplers.layout == vk::DescriptorSetLayout::null() {
-            let sets = [self.descriptors_buffer.gpu.set, self.descriptors_image.gpu.set];
-            self.cmd_bind_descriptor_sets(
-                cmd_buffer,
-                pipeline,
-                layout.pipeline_layout,
-                0,
-                &sets,
-                &[],
-            );
-        } else {
-            let sets = [
-                self.descriptors_buffer.gpu.set,
-                self.descriptors_image.gpu.set,
-                layout.samplers.set,
-            ];
-            self.cmd_bind_descriptor_sets(
-                cmd_buffer,
-                pipeline,
-                layout.pipeline_layout,
-                0,
-                &sets,
-                &[],
-            );
-        }
+        let sets = [
+            self.descriptors_buffer.gpu.set,
+            self.descriptors_image.gpu.set,
+            layout.samplers.set,
+            self.descriptors_accel.gpu.set,
+        ];
+        self.cmd_bind_descriptor_sets(
+            cmd_buffer,
+            pipeline,
+            layout.pipeline_layout,
+            0,
+            &sets,
+            &[],
+        );
     }
 }
 

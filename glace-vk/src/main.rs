@@ -592,37 +592,16 @@ fn main() -> anyhow::Result<()> {
             gpu.create_render_pass(&desc, None)?
         };
 
-        let mesh_fbo = {
-            let image_formats0 = [wsi.surface_format.format];
-            let image_formats1 = [depth_stencil_format];
-            let images = [
-                vk::FramebufferAttachmentImageInfo::builder()
-                    .view_formats(&image_formats0)
-                    .width(size.width as _)
-                    .height(size.height as _)
-                    .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-                    .layer_count(1)
-                    .build(),
-                vk::FramebufferAttachmentImageInfo::builder()
-                    .view_formats(&image_formats1)
-                    .width(size.width as _)
-                    .height(size.height as _)
-                    .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-                    .layer_count(1)
-                    .build(),
-            ];
-            let mut attachments =
-                vk::FramebufferAttachmentsCreateInfo::builder().attachment_image_infos(&images);
-            let mut desc = vk::FramebufferCreateInfo::builder()
-                .flags(vk::FramebufferCreateFlags::IMAGELESS)
+        let mesh_fbos = wsi.frame_rtvs.iter().map(|rtv| {
+            let attachments = [*rtv, depth_stencil_view];
+            let desc = vk::FramebufferCreateInfo::builder()
                 .render_pass(mesh_pass)
                 .width(size.width as _)
                 .height(size.height as _)
                 .layers(1)
-                .push_next(&mut attachments);
-            desc.attachment_count = images.len() as _;
-            gpu.create_framebuffer(&desc, None)?
-        };
+                .attachments(&attachments);
+            gpu.create_framebuffer(&desc, None)
+        }).collect::<Result<Vec<_>, _>>()?;
 
         let mesh_sampler = {
             let desc = vk::SamplerCreateInfo::builder(); // TODO: linear
@@ -941,12 +920,9 @@ fn main() -> anyhow::Result<()> {
                         },
                     ];
 
-                    let attachments = [wsi.frame_rtvs[image_index], depth_stencil_view];
-                    let mut render_pass_attachments =
-                        vk::RenderPassAttachmentBeginInfo::builder().attachments(&attachments);
                     let mesh_pass_begin_desc = vk::RenderPassBeginInfo::builder()
                         .render_pass(mesh_pass)
-                        .framebuffer(mesh_fbo)
+                        .framebuffer(mesh_fbos[frame_local])
                         .render_area(vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
                             extent: vk::Extent2D {
@@ -954,8 +930,8 @@ fn main() -> anyhow::Result<()> {
                                 height: size.height as _,
                             },
                         })
-                        .clear_values(&clear_values)
-                        .push_next(&mut render_pass_attachments);
+                        .clear_values(&clear_values);
+
                     gpu.cmd_begin_render_pass(
                         main_cmd_buffer,
                         &mesh_pass_begin_desc,

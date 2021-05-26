@@ -5,6 +5,7 @@ members = [
     "glace-grr/shader",
     "glace-vk",
     "glace-vk/shader",
+    "glacier",
 ]
 
 [profile.release]
