@@ -50,6 +50,7 @@ impl Gpu {
                 .variable_pointers(true)
                 .variable_pointers_storage_buffer(true);
             let mut features12 = vk::PhysicalDeviceVulkan12Features::builder()
+                .timeline_semaphore(true)
                 .buffer_device_address(true)
                 .descriptor_indexing(true)
                 .descriptor_binding_partially_bound(true)
@@ -411,7 +412,7 @@ impl Gpu {
             accel_handles.push(accel.acceleration_structure);
         }
         let mut accel_infos = Vec::new();
-        for (i, accel) in accels.iter().enumerate() {
+        for i in 0..accels.len() {
             accel_infos.push(vk::WriteDescriptorSetAccelerationStructureKHR::builder()
                 .acceleration_structures(&accel_handles[i .. i + 1]).build()
             );
