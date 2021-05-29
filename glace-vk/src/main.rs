@@ -198,7 +198,7 @@ fn main() -> anyhow::Result<()> {
 
             // let pre_transfer_dep =
             //     vk::DependencyInfoKHR::builder().image_memory_barriers(&pre_transfer_barrier);
-            // gpu.ext_sync2
+            // gpu.ext.sync2
             //     .cmd_pipeline_barrier2(upload_cmd_buffer, &pre_transfer_dep);
 
             let transfer_barrier = [
@@ -306,203 +306,216 @@ fn main() -> anyhow::Result<()> {
             load_png("SciFiHelmet_Normal.png", vk::Format::R8G8B8A8_UNORM, true)?;
 
         // acceleration structure
-        let geometry = [
-            vk::AccelerationStructureGeometryKHR::builder()
-                .flags(vk::GeometryFlagsKHR::OPAQUE)
-                .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
-                .geometry(
-                    vk::AccelerationStructureGeometryDataKHR {
-                        triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::builder()
-                            .vertex_format(vk::Format::R32G32B32_SFLOAT)
-                            .vertex_data(vk::DeviceOrHostAddressConstKHR {
-                                device_address: gpu.buffer_address(mesh_gpu) + num_vertex * 4,
-                            })
-                            .vertex_stride(12)
-                            .max_vertex(num_vertex as _)
-                            .index_type(vk::IndexType::UINT32)
-                            .index_data(vk::DeviceOrHostAddressConstKHR {
-                                device_address: gpu.buffer_address(mesh_gpu),
-                            })
-                            .build()
-                    }
-                )
-                .build()
-        ];
-        let primitives = [num_indices / 3];
-        let build_geometry = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
-            .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
-            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
-            .geometries(&geometry);
-        let blas_size = gpu.ext_accel_structure.get_acceleration_structure_build_sizes(
-            vk::AccelerationStructureBuildTypeKHR::DEVICE,
-            &build_geometry,
-            &primitives,
-        );
+        #[cfg(feature = "raytrace")]
+        {
+            let geometry = [
+                vk::AccelerationStructureGeometryKHR::builder()
+                    .flags(vk::GeometryFlagsKHR::OPAQUE)
+                    .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+                    .geometry(
+                        vk::AccelerationStructureGeometryDataKHR {
+                            triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::builder()
+                                .vertex_format(vk::Format::R32G32B32_SFLOAT)
+                                .vertex_data(vk::DeviceOrHostAddressConstKHR {
+                                    device_address: gpu.buffer_address(mesh_gpu) + num_vertex * 4,
+                                })
+                                .vertex_stride(12)
+                                .max_vertex(num_vertex as _)
+                                .index_type(vk::IndexType::UINT32)
+                                .index_data(vk::DeviceOrHostAddressConstKHR {
+                                    device_address: gpu.buffer_address(mesh_gpu),
+                                })
+                                .build()
+                        }
+                    )
+                    .build()
+            ];
+            let primitives = [num_indices / 3];
+            let build_geometry = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
+                .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+                .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+                .geometries(&geometry);
+            let blas_size = gpu.ext.accel_structure.get_acceleration_structure_build_sizes(
+                vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                &build_geometry,
+                &primitives,
+            );
 
-        let blas_buffer = gpu.create_buffer_gpu::<u8>(
-            "blas gpu",
-            blas_size.acceleration_structure_size as _,
-            gpu::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR,
-        )?;
+            let blas_buffer = gpu.create_buffer_gpu::<u8>(
+                "blas gpu",
+                blas_size.acceleration_structure_size as _,
+                gpu::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR,
+            )?;
 
-        let blas_scratch_buffer = gpu.create_buffer_gpu::<u8>(
-            "blas (scratch) gpu",
-            blas_size.build_scratch_size as _,
-            gpu::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-        )?;
+            let blas_scratch_buffer = gpu.create_buffer_gpu::<u8>(
+                "blas (scratch) gpu",
+                blas_size.build_scratch_size as _,
+                gpu::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )?;
 
-        let blas = {
-            let desc = vk::AccelerationStructureCreateInfoKHR::builder()
-                .buffer(blas_buffer)
-                .offset(0)
-                .size(blas_size.acceleration_structure_size)
-                .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL);
-            gpu.ext_accel_structure.create_acceleration_structure(
-                &desc, None
-            )?
-        };
-
-        let build_geometry = [vk::AccelerationStructureBuildGeometryInfoKHR::builder()
-            .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
-            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-            .dst_acceleration_structure(blas)
-            .scratch_data(vk::DeviceOrHostAddressKHR {
-                device_address: gpu.buffer_address(blas_scratch_buffer),
-            })
-            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
-            .geometries(&geometry)
-            .build()
-        ];
-        let build_range = [
-            vk::AccelerationStructureBuildRangeInfoKHR {
-                primitive_count: num_indices / 3,
-                primitive_offset: 0,
-                first_vertex: 0,
-                transform_offset: 0,
-            }
-        ];
-
-        gpu.ext_accel_structure.cmd_build_acceleration_structures(
-            upload_cmd_buffer,
-            &build_geometry,
-            &[&build_range],
-        );
-
-        // tlas
-        let tlas_instances = [
-            vk::AccelerationStructureInstanceKHR {
-                transform: vk::TransformMatrixKHR {
-                    matrix: [
-                        1.0, 0.0, 0.0, 0.0,
-                        0.0, 1.0, 0.0, 0.0,
-                        0.0, 0.0, 1.0, 0.0,
-                    ]
-                },
-                instance_custom_index_and_mask: 0xFF,
-                instance_shader_binding_table_record_offset_and_flags: 0,
-                acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
-                    device_handle: gpu.acceleration_structure_address(blas),
-                },
-            }
-        ];
-        let tlas_instances_buffer = {
-            let size = std::mem::size_of::<vk::AccelerationStructureInstanceKHR>() * tlas_instances.len();
-            let desc = vk::BufferCreateInfo::builder()
-                .size(size as _)
-                .usage(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
-            let buffer = gpu.create_buffer(&desc, None)?;
-            let alloc_desc = AllocationCreateDesc {
-                name: "tlas instances",
-                requirements: gpu.get_buffer_memory_requirements(buffer),
-                location: gpu_allocator::MemoryLocation::CpuToGpu,
-                linear: true,
+            let blas = {
+                let desc = vk::AccelerationStructureCreateInfoKHR::builder()
+                    .buffer(blas_buffer)
+                    .offset(0)
+                    .size(blas_size.acceleration_structure_size)
+                    .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL);
+                gpu.ext.accel_structure.create_acceleration_structure(
+                    &desc, None
+                )?
             };
-            let mut allocation = gpu.allocator.allocate(&alloc_desc)?;
-            {
-                let mapping = allocation.mapped_slice_mut().unwrap();
-                mapping[..size].copy_from_slice(gpu::as_u8_slice(&tlas_instances));
-            }
-            gpu.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
-            buffer
-        };
 
-        let geometry = [
-            vk::AccelerationStructureGeometryKHR::builder()
-                .flags(vk::GeometryFlagsKHR::OPAQUE)
-                .geometry_type(vk::GeometryTypeKHR::INSTANCES)
-                .geometry(
-                    vk::AccelerationStructureGeometryDataKHR {
-                        instances: vk::AccelerationStructureGeometryInstancesDataKHR::builder()
-                            .array_of_pointers(false)
-                            .data(vk::DeviceOrHostAddressConstKHR {
-                                device_address: gpu.buffer_address(tlas_instances_buffer),
-                            })
-                            .build()
-                    }
-                )
+            let build_geometry = [vk::AccelerationStructureBuildGeometryInfoKHR::builder()
+                .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+                .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                .dst_acceleration_structure(blas)
+                .scratch_data(vk::DeviceOrHostAddressKHR {
+                    device_address: gpu.buffer_address(blas_scratch_buffer),
+                })
+                .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+                .geometries(&geometry)
                 .build()
-        ];
-        let primitives = [1];
-        let build_geometry = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
-            .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
-            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
-            .geometries(&geometry);
-        let tlas_size = gpu.ext_accel_structure.get_acceleration_structure_build_sizes(
-            vk::AccelerationStructureBuildTypeKHR::DEVICE,
-            &build_geometry,
-            &primitives,
-        );
+            ];
+            let build_range = [
+                vk::AccelerationStructureBuildRangeInfoKHR {
+                    primitive_count: num_indices / 3,
+                    primitive_offset: 0,
+                    first_vertex: 0,
+                    transform_offset: 0,
+                }
+            ];
 
-        let tlas_buffer = gpu.create_buffer_gpu::<u8>(
-            "tlas gpu",
-            tlas_size.acceleration_structure_size as _,
-            gpu::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR,
-        )?;
+            gpu.ext.accel_structure.cmd_build_acceleration_structures(
+                upload_cmd_buffer,
+                &build_geometry,
+                &[&build_range],
+            );
 
-        let tlas_scratch_buffer = gpu.create_buffer_gpu::<u8>(
-            "tlas (scratch) gpu",
-            tlas_size.build_scratch_size as _,
-            gpu::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-        )?;
+            // tlas
+            let tlas_instances = [
+                vk::AccelerationStructureInstanceKHR {
+                    transform: vk::TransformMatrixKHR {
+                        matrix: [
+                            1.0, 0.0, 0.0, 0.0,
+                            0.0, 1.0, 0.0, 0.0,
+                            0.0, 0.0, 1.0, 0.0,
+                        ]
+                    },
+                    instance_custom_index_and_mask: 0xFF,
+                    instance_shader_binding_table_record_offset_and_flags: 0,
+                    acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
+                        device_handle: gpu.acceleration_structure_address(blas),
+                    },
+                }
+            ];
+            let tlas_instances_buffer = {
+                let size = std::mem::size_of::<vk::AccelerationStructureInstanceKHR>() * tlas_instances.len();
+                let desc = vk::BufferCreateInfo::builder()
+                    .size(size as _)
+                    .usage(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
+                let buffer = gpu.create_buffer(&desc, None)?;
+                let alloc_desc = AllocationCreateDesc {
+                    name: "tlas instances",
+                    requirements: gpu.get_buffer_memory_requirements(buffer),
+                    location: gpu_allocator::MemoryLocation::CpuToGpu,
+                    linear: true,
+                };
+                let mut allocation = gpu.allocator.allocate(&alloc_desc)?;
+                {
+                    let mapping = allocation.mapped_slice_mut().unwrap();
+                    mapping[..size].copy_from_slice(gpu::as_u8_slice(&tlas_instances));
+                }
+                gpu.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
+                buffer
+            };
 
-        let tlas = {
-            let desc = vk::AccelerationStructureCreateInfoKHR::builder()
-                .buffer(tlas_buffer)
-                .offset(0)
-                .size(tlas_size.acceleration_structure_size)
-                .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL);
-            gpu.ext_accel_structure.create_acceleration_structure(
-                &desc, None
-            )?
-        };
+            let geometry = [
+                vk::AccelerationStructureGeometryKHR::builder()
+                    .flags(vk::GeometryFlagsKHR::OPAQUE)
+                    .geometry_type(vk::GeometryTypeKHR::INSTANCES)
+                    .geometry(
+                        vk::AccelerationStructureGeometryDataKHR {
+                            instances: vk::AccelerationStructureGeometryInstancesDataKHR::builder()
+                                .array_of_pointers(false)
+                                .data(vk::DeviceOrHostAddressConstKHR {
+                                    device_address: gpu.buffer_address(tlas_instances_buffer),
+                                })
+                                .build()
+                        }
+                    )
+                    .build()
+            ];
+            let primitives = [1];
+            let build_geometry = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
+                .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+                .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+                .geometries(&geometry);
+            let tlas_size = gpu.ext.accel_structure.get_acceleration_structure_build_sizes(
+                vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                &build_geometry,
+                &primitives,
+            );
 
-        let build_geometry = [vk::AccelerationStructureBuildGeometryInfoKHR::builder()
-            .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
-            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-            .dst_acceleration_structure(tlas)
-            .scratch_data(vk::DeviceOrHostAddressKHR {
-                device_address: gpu.buffer_address(tlas_scratch_buffer),
-            })
-            .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
-            .geometries(&geometry)
-            .build()
-        ];
-        let build_range = [
-            vk::AccelerationStructureBuildRangeInfoKHR {
-                primitive_count: 1,
-                primitive_offset: 0,
-                first_vertex: 0,
-                transform_offset: 0,
-            }
-        ];
+            let tlas_buffer = gpu.create_buffer_gpu::<u8>(
+                "tlas gpu",
+                tlas_size.acceleration_structure_size as _,
+                gpu::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR,
+            )?;
 
-        gpu.ext_accel_structure.cmd_build_acceleration_structures(
-            upload_cmd_buffer,
-            &build_geometry,
-            &[&build_range],
-        );
+            let tlas_scratch_buffer = gpu.create_buffer_gpu::<u8>(
+                "tlas (scratch) gpu",
+                tlas_size.build_scratch_size as _,
+                gpu::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )?;
+
+            let tlas = {
+                let desc = vk::AccelerationStructureCreateInfoKHR::builder()
+                    .buffer(tlas_buffer)
+                    .offset(0)
+                    .size(tlas_size.acceleration_structure_size)
+                    .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL);
+                gpu.ext.accel_structure.create_acceleration_structure(
+                    &desc, None
+                )?
+            };
+
+            let build_geometry = [vk::AccelerationStructureBuildGeometryInfoKHR::builder()
+                .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+                .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                .dst_acceleration_structure(tlas)
+                .scratch_data(vk::DeviceOrHostAddressKHR {
+                    device_address: gpu.buffer_address(tlas_scratch_buffer),
+                })
+                .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+                .geometries(&geometry)
+                .build()
+            ];
+            let build_range = [
+                vk::AccelerationStructureBuildRangeInfoKHR {
+                    primitive_count: 1,
+                    primitive_offset: 0,
+                    first_vertex: 0,
+                    transform_offset: 0,
+                }
+            ];
+
+            gpu.ext.accel_structure.cmd_build_acceleration_structures(
+                upload_cmd_buffer,
+                &build_geometry,
+                &[&build_range],
+            );
+
+            let tlas_handle = gpu.descriptors_accel.create();
+
+            let accel_info = [
+                gpu::AccelerationStructureDescriptor {
+                    handle: tlas_handle,
+                    acceleration_structure: tlas,
+                },
+            ];
+            gpu.update_descriptors(&[], &[], &accel_info);
+        }
 
         gpu.end_command_buffer(upload_cmd_buffer)?;
         let upload_buffers = [upload_cmd_buffer];
@@ -621,7 +634,6 @@ fn main() -> anyhow::Result<()> {
         let albedo_srv_handle = gpu.descriptors_image.create();
         let normal_srv_handle = gpu.descriptors_image.create();
 
-        let tlas_handle = gpu.descriptors_accel.create();
 
         {
             let base_offset = num_indices as u64 * 4;
@@ -681,13 +693,7 @@ fn main() -> anyhow::Result<()> {
                     layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 },
             ];
-            let accel_info = [
-                gpu::AccelerationStructureDescriptor {
-                    handle: tlas_handle,
-                    acceleration_structure: tlas,
-                },
-            ];
-            gpu.update_descriptors(&buffer_info, &image_info, &accel_info);
+            gpu.update_descriptors(&buffer_info, &image_info, &[]);
         }
 
         let spirv_dir = Path::new(env!("spv"));
@@ -881,7 +887,7 @@ fn main() -> anyhow::Result<()> {
                     //     .build()];
                     // let full_barrier_dep =
                     //     vk::DependencyInfoKHR::builder().memory_barriers(&mem_barrier);
-                    // gpu.ext_sync2
+                    // gpu.ext.sync2
                     //     .cmd_pipeline_barrier2(main_cmd_buffer, &full_barrier_dep);
 
                     let mem_barrier = [

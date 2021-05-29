@@ -5,7 +5,8 @@ authors = ["msiglreith <m.siglreith@gmail.com>"]
 edition = "2018"
 workspace = ".."
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+raytrace = []
 
 [dependencies]
 ash = "0.32"

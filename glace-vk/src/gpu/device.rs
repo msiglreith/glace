@@ -9,6 +9,14 @@ use glace::std::bindless::RenderResourceTag;
 
 const NUM_LAYOUTS: u32 = 64;
 
+pub struct Extensions {
+    pub sync2: khr::Synchronization2,
+    #[cfg(feature = "raytrace")]
+    pub accel_structure: khr::AccelerationStructure,
+    #[cfg(feature = "raytrace")]
+    pub deferred: khr::DeferredHostOperations,
+}
+
 pub struct Gpu {
     pub device: ash::Device,
     pub queue: vk::Queue,
@@ -20,9 +28,7 @@ pub struct Gpu {
     pub descriptors_buffer: gpu::Descriptors,
     pub descriptors_image: gpu::Descriptors,
     pub descriptors_accel: gpu::Descriptors,
-    pub ext_sync2: khr::Synchronization2,
-    pub ext_accel_structure: khr::AccelerationStructure,
-    pub ext_deferred: khr::DeferredHostOperations,
+    pub ext: Extensions,
     frame_id: usize,
 }
 
@@ -39,12 +45,18 @@ impl Gpu {
         descriptors: DescriptorsDesc,
     ) -> anyhow::Result<Self> {
         let (device, queue) = {
-            let device_extensions = vec![
+            let mut device_extensions = vec![
                 khr::Swapchain::name().as_ptr(),
                 // khr::Synchronization2::name().as_ptr(),
-                khr::DeferredHostOperations::name().as_ptr(),
-                khr::AccelerationStructure::name().as_ptr(),
             ];
+
+            if cfg!(feature = "raytrace") {
+                device_extensions.extend(&[
+                    khr::DeferredHostOperations::name().as_ptr(),
+                khr::AccelerationStructure::name().as_ptr(),
+                ]);
+            }
+
             let features = vk::PhysicalDeviceFeatures::builder();
             let mut features11 = vk::PhysicalDeviceVulkan11Features::builder()
                 .variable_pointers(true)
@@ -70,15 +82,18 @@ impl Gpu {
                 .queue_family_index(instance.family_index)
                 .queue_priorities(&queue_priorities)
                 .build()];
-            let device_desc = vk::DeviceCreateInfo::builder()
+            let mut device_desc = vk::DeviceCreateInfo::builder()
                 .queue_create_infos(&queue_descs)
                 .enabled_extension_names(&device_extensions)
                 .enabled_features(&features)
                 .push_next(&mut features11)
                 .push_next(&mut features12)
                 // .push_next(&mut features_sync2)
-                .push_next(&mut features_ray_query)
-                .push_next(&mut features_accel_structure);
+                .push_next(&mut features_ray_query);
+
+            if cfg!(feature = "raytrace") {
+                device_desc = device_desc.push_next(&mut features_accel_structure);
+            }
 
             let device =
                 instance
@@ -91,7 +106,10 @@ impl Gpu {
 
         // extensions
         let ext_sync2 = khr::Synchronization2::new(&instance.instance, &device);
+
+        #[cfg(feature = "raytrace")]
         let ext_accel_structure = khr::AccelerationStructure::new(&instance.instance, &device);
+        #[cfg(feature = "raytrace")]
         let ext_deferred = khr::DeferredHostOperations::new(&instance.instance, &device);
 
         let allocator = VulkanAllocator::new(&VulkanAllocatorCreateDesc {
@@ -132,6 +150,10 @@ impl Gpu {
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::SAMPLED_IMAGE,
                     descriptor_count: descriptors.images as _,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+                    descriptor_count: descriptors.acceleration_structures as _,
                 },
             ];
             let desc = vk::DescriptorPoolCreateInfo::builder()
@@ -226,11 +248,13 @@ impl Gpu {
         };
         let descriptors_image = gpu::Descriptors::new(RenderResourceTag::Texture, descriptors.images, gpu_images);
 
-        let gpu_accel = gpu::GpuDescriptors {
-            layout: acceleration_structure_layout,
-            set: sets[2],
+        let descriptors_accel = {
+            let gpu_accel = gpu::GpuDescriptors {
+                layout: acceleration_structure_layout,
+                set: sets[2],
+            };
+            gpu::Descriptors::new(RenderResourceTag::Tlas, descriptors.acceleration_structures, gpu_accel)
         };
-        let descriptors_accel = gpu::Descriptors::new(RenderResourceTag::Tlas, descriptors.acceleration_structures, gpu_accel);
 
         Ok(Self {
             device,
@@ -243,16 +267,21 @@ impl Gpu {
             descriptors_buffer,
             descriptors_image,
             descriptors_accel,
-            ext_sync2,
-            ext_accel_structure,
-            ext_deferred,
+            ext: Extensions {
+                sync2: ext_sync2,
+                #[cfg(feature = "raytrace")]
+                accel_structure: ext_accel_structure,
+                #[cfg(feature = "raytrace")]
+                deferred: ext_deferred,
+            },
             frame_id: 0,
         })
     }
 
+    #[cfg(feature = "raytrace")]
     pub unsafe fn acceleration_structure_address(&self, acceleration_structure: gpu::AccelerationStructure) -> vk::DeviceAddress {
         let desc = vk::AccelerationStructureDeviceAddressInfoKHR::builder().acceleration_structure(acceleration_structure);
-        self.ext_accel_structure.get_acceleration_structure_device_address(&desc)
+        self.ext.accel_structure.get_acceleration_structure_device_address(&desc)
     }
 
     pub unsafe fn buffer_address(&self, buffer: gpu::Buffer) -> vk::DeviceAddress {
@@ -407,6 +436,7 @@ impl Gpu {
             )
         }
 
+
         let mut accel_handles = Vec::new();
         for accel in accels {
             accel_handles.push(accel.acceleration_structure);
@@ -417,6 +447,8 @@ impl Gpu {
                 .acceleration_structures(&accel_handles[i .. i + 1]).build()
             );
         }
+
+        #[cfg(feature = "raytrace")]
         for (i, accel) in accels.iter().enumerate() {
             assert!(self.descriptors_accel.is_valid(accel.handle));
             let mut write = vk::WriteDescriptorSet::builder()
