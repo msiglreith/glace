@@ -1,11 +1,7 @@
 use crate::gpu;
-use ash::{
-    extensions::khr,
-    version::{DeviceV1_0, DeviceV1_2, InstanceV1_0},
-    vk,
-};
-use gpu_allocator::{VulkanAllocator, VulkanAllocatorCreateDesc};
+use ash::{extensions::khr, vk};
 use glace::std::bindless::RenderResourceTag;
+use gpu_allocator::{VulkanAllocator, VulkanAllocatorCreateDesc};
 
 const NUM_LAYOUTS: u32 = 64;
 
@@ -17,16 +13,42 @@ pub struct Extensions {
     pub deferred: khr::DeferredHostOperations,
 }
 
+struct Shrine {
+    buffers: Vec<vk::Buffer>,
+    images: Vec<vk::Image>,
+}
+
+impl Shrine {
+    fn new() -> Self {
+        Shrine {
+            buffers: Vec::new(),
+            images: Vec::new(),
+        }
+    }
+}
+
+struct PoolData {
+    cmd_pool: vk::CommandPool,
+    cmd_buffer: vk::CommandBuffer,
+    shrine: Shrine,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct Pool {
+    pub frame_id: usize,
+    pub cmd_buffer: vk::CommandBuffer,
+}
+
 pub struct Gpu {
     pub device: ash::Device,
     pub queue: vk::Queue,
     pub allocator: VulkanAllocator,
-    pub cmd_pools: Vec<vk::CommandPool>,
-    pub cmd_buffers: Vec<vk::CommandBuffer>,
+    pools: Vec<PoolData>,
     pub timeline: vk::Semaphore,
     pub descriptor_pool: vk::DescriptorPool,
     pub descriptors_buffer: gpu::Descriptors,
     pub descriptors_image: gpu::Descriptors,
+    #[cfg(feature = "raytrace")]
     pub descriptors_accel: gpu::Descriptors,
     pub ext: Extensions,
     frame_id: usize,
@@ -47,13 +69,13 @@ impl Gpu {
         let (device, queue) = {
             let mut device_extensions = vec![
                 khr::Swapchain::name().as_ptr(),
-                // khr::Synchronization2::name().as_ptr(),
+                khr::Synchronization2::name().as_ptr(),
             ];
 
             if cfg!(feature = "raytrace") {
                 device_extensions.extend(&[
                     khr::DeferredHostOperations::name().as_ptr(),
-                khr::AccelerationStructure::name().as_ptr(),
+                    khr::AccelerationStructure::name().as_ptr(),
                 ]);
             }
 
@@ -75,7 +97,8 @@ impl Gpu {
             let mut features_ray_query =
                 vk::PhysicalDeviceRayQueryFeaturesKHR::builder().ray_query(true);
             let mut features_accel_structure =
-                vk::PhysicalDeviceAccelerationStructureFeaturesKHR::builder().acceleration_structure(true);
+                vk::PhysicalDeviceAccelerationStructureFeaturesKHR::builder()
+                    .acceleration_structure(true);
 
             let queue_priorities = [1.0];
             let queue_descs = [vk::DeviceQueueCreateInfo::builder()
@@ -88,7 +111,7 @@ impl Gpu {
                 .enabled_features(&features)
                 .push_next(&mut features11)
                 .push_next(&mut features12)
-                // .push_next(&mut features_sync2)
+                .push_next(&mut features_sync2)
                 .push_next(&mut features_ray_query);
 
             if cfg!(feature = "raytrace") {
@@ -119,27 +142,28 @@ impl Gpu {
             debug_settings: Default::default(),
         });
 
-        let cmd_pools = (0..frame_buffering)
+        let pools = (0..frame_buffering)
             .map(|_| {
-                let desc =
-                    vk::CommandPoolCreateInfo::builder().queue_family_index(instance.family_index);
-                device.create_command_pool(&desc, None)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let cmd_buffers = {
-            let cmd_buffers = cmd_pools
-                .iter()
-                .map(|pool| {
+                let cmd_pool = {
+                    let desc =
+                        vk::CommandPoolCreateInfo::builder().queue_family_index(instance.family_index);
+                    device.create_command_pool(&desc, None)?
+                };
+                let cmd_buffer = {
                     let desc = vk::CommandBufferAllocateInfo::builder()
-                        .command_pool(*pool)
+                        .command_pool(cmd_pool)
                         .level(vk::CommandBufferLevel::PRIMARY)
                         .command_buffer_count(1);
-                    device.allocate_command_buffers(&desc)
+                    device.allocate_command_buffers(&desc)?[0]
+                };
+
+                Ok(PoolData {
+                    cmd_pool,
+                    cmd_buffer,
+                    shrine: Shrine::new(),
                 })
-                .collect::<Result<Vec<_>, _>>()?;
-            cmd_buffers.into_iter().flatten().collect()
-        };
+            })
+            .collect::<Result<Vec<_>, vk::Result>>()?;
 
         let descriptor_pool = {
             let pool_sizes = [
@@ -199,6 +223,7 @@ impl Gpu {
                 .push_next(&mut flag_desc);
             device.create_descriptor_set_layout(&desc, None)?
         };
+        #[cfg(feature = "raytrace")]
         let acceleration_structure_layout = {
             let binding_flags = [vk::DescriptorBindingFlags::PARTIALLY_BOUND; 1];
             let mut flag_desc = vk::DescriptorSetLayoutBindingFlagsCreateInfo::builder()
@@ -219,7 +244,12 @@ impl Gpu {
         };
 
         let sets = {
-            let layouts = [buffer_layout, sampled_image_layout, acceleration_structure_layout];
+            let layouts = [
+                buffer_layout,
+                sampled_image_layout,
+                #[cfg(feature = "raytrace")]
+                acceleration_structure_layout,
+            ];
 
             let desc = vk::DescriptorSetAllocateInfo::builder()
                 .set_layouts(&layouts)
@@ -240,32 +270,39 @@ impl Gpu {
             layout: buffer_layout,
             set: sets[0],
         };
-        let descriptors_buffer = gpu::Descriptors::new(RenderResourceTag::Buffer, descriptors.buffers, gpu_buffers);
+        let descriptors_buffer =
+            gpu::Descriptors::new(RenderResourceTag::Buffer, descriptors.buffers, gpu_buffers);
 
         let gpu_images = gpu::GpuDescriptors {
             layout: sampled_image_layout,
             set: sets[1],
         };
-        let descriptors_image = gpu::Descriptors::new(RenderResourceTag::Texture, descriptors.images, gpu_images);
+        let descriptors_image =
+            gpu::Descriptors::new(RenderResourceTag::Texture, descriptors.images, gpu_images);
 
+        #[cfg(feature = "raytrace")]
         let descriptors_accel = {
             let gpu_accel = gpu::GpuDescriptors {
                 layout: acceleration_structure_layout,
                 set: sets[2],
             };
-            gpu::Descriptors::new(RenderResourceTag::Tlas, descriptors.acceleration_structures, gpu_accel)
+            gpu::Descriptors::new(
+                RenderResourceTag::Tlas,
+                descriptors.acceleration_structures,
+                gpu_accel,
+            )
         };
 
         Ok(Self {
             device,
             queue,
             allocator,
-            cmd_pools,
-            cmd_buffers,
+            pools,
             timeline,
             descriptor_pool,
             descriptors_buffer,
             descriptors_image,
+            #[cfg(feature = "raytrace")]
             descriptors_accel,
             ext: Extensions {
                 sync2: ext_sync2,
@@ -279,23 +316,29 @@ impl Gpu {
     }
 
     #[cfg(feature = "raytrace")]
-    pub unsafe fn acceleration_structure_address(&self, acceleration_structure: gpu::AccelerationStructure) -> vk::DeviceAddress {
-        let desc = vk::AccelerationStructureDeviceAddressInfoKHR::builder().acceleration_structure(acceleration_structure);
-        self.ext.accel_structure.get_acceleration_structure_device_address(&desc)
+    pub unsafe fn acceleration_structure_address(
+        &self,
+        acceleration_structure: gpu::AccelerationStructure,
+    ) -> vk::DeviceAddress {
+        let desc = vk::AccelerationStructureDeviceAddressInfoKHR::builder()
+            .acceleration_structure(acceleration_structure);
+        self.ext
+            .accel_structure
+            .get_acceleration_structure_device_address(&desc)
     }
 
+    #[cfg(feature = "raytrace")]
     pub unsafe fn buffer_address(&self, buffer: gpu::Buffer) -> vk::DeviceAddress {
         let desc = vk::BufferDeviceAddressInfo::builder().buffer(buffer);
         self.get_buffer_device_address(&desc)
     }
 
-    pub unsafe fn create_buffer_gpu<T>(
+    pub unsafe fn create_buffer_gpu(
         &mut self,
         name: &str,
-        len: usize,
+        size: usize,
         usage: gpu::BufferUsageFlags,
     ) -> anyhow::Result<gpu::Buffer> {
-        let size = std::mem::size_of::<T>() * len;
         let desc = vk::BufferCreateInfo::builder().size(size as _).usage(usage);
         let buffer = self.create_buffer(&desc, None)?;
         let alloc_desc = gpu_allocator::AllocationCreateDesc {
@@ -337,6 +380,7 @@ impl Gpu {
             self.descriptors_buffer.gpu.layout,
             self.descriptors_image.gpu.layout,
             sampler_layout,
+            #[cfg(feature = "raytrace")]
             self.descriptors_accel.gpu.layout,
         ];
         let push_constants = [vk::PushConstantRange::builder()
@@ -359,9 +403,11 @@ impl Gpu {
         })
     }
 
-    pub unsafe fn acquire_cmd_buffer(&mut self) -> anyhow::Result<vk::CommandBuffer> {
-        let frame_queue = self.cmd_pools.len();
+    pub unsafe fn acquire_pool(&mut self) -> anyhow::Result<Pool> {
+        let frame_queue = self.pools.len();
         let frame_local = self.frame_id % frame_queue;
+        let pool = &mut self.pools[frame_local];
+
         if self.frame_id >= frame_queue {
             let semaphores = [self.timeline];
             let wait_values = [(self.frame_id - frame_queue + 1) as u64];
@@ -370,19 +416,30 @@ impl Gpu {
                 .values(&wait_values);
             self.device.wait_semaphores(&wait_info, !0)?;
             self.device.reset_command_pool(
-                self.cmd_pools[frame_local],
+                pool.cmd_pool,
                 vk::CommandPoolResetFlags::empty(),
             )?;
+            for buffer in pool.shrine.buffers.drain(..) {
+                self.device.destroy_buffer(buffer, None);
+            }
+            for image in pool.shrine.images.drain(..) {
+                self.device.destroy_image(image, None);
+            }
         }
 
-        let cmd_buffer = self.cmd_buffers[frame_local];
+        let cmd_buffer = pool.cmd_buffer;
         let begin_desc = vk::CommandBufferBeginInfo::builder()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         self.device.begin_command_buffer(cmd_buffer, &begin_desc)?;
 
+        let pool_handle = Pool {
+            cmd_buffer,
+            frame_id: self.frame_id,
+        };
+
         self.frame_id += 1;
 
-        Ok(cmd_buffer)
+        Ok(pool_handle)
     }
 
     pub unsafe fn update_descriptors(
@@ -395,7 +452,6 @@ impl Gpu {
 
         let mut buffer_infos = Vec::new();
         for buffer in buffers {
-
             buffer_infos.push(vk::DescriptorBufferInfo {
                 buffer: buffer.buffer,
                 offset: buffer.offset,
@@ -410,8 +466,8 @@ impl Gpu {
                     .dst_set(self.descriptors_buffer.gpu.set)
                     .dst_binding(0)
                     .dst_array_element(buffer.handle.index())
-                    .buffer_info(&buffer_infos[i .. i+1])
-                    .build()
+                    .buffer_info(&buffer_infos[i..i + 1])
+                    .build(),
             )
         }
 
@@ -419,8 +475,8 @@ impl Gpu {
         for image in images {
             image_infos.push(vk::DescriptorImageInfo {
                 sampler: vk::Sampler::null(),
-                    image_view: image.view,
-                    image_layout: image.layout,
+                image_view: image.view,
+                image_layout: image.layout,
             });
         }
         for (i, image) in images.iter().enumerate() {
@@ -431,11 +487,10 @@ impl Gpu {
                     .dst_set(self.descriptors_image.gpu.set)
                     .dst_binding(0)
                     .dst_array_element(image.handle.index())
-                    .image_info(&image_infos[i .. i + 1])
+                    .image_info(&image_infos[i..i + 1])
                     .build(),
             )
         }
-
 
         let mut accel_handles = Vec::new();
         for accel in accels {
@@ -443,8 +498,10 @@ impl Gpu {
         }
         let mut accel_infos = Vec::new();
         for i in 0..accels.len() {
-            accel_infos.push(vk::WriteDescriptorSetAccelerationStructureKHR::builder()
-                .acceleration_structures(&accel_handles[i .. i + 1]).build()
+            accel_infos.push(
+                vk::WriteDescriptorSetAccelerationStructureKHR::builder()
+                    .acceleration_structures(&accel_handles[i..i + 1])
+                    .build(),
             );
         }
 
@@ -462,10 +519,7 @@ impl Gpu {
             updates.push(write);
         }
 
-        self.update_descriptor_sets(
-            &updates,
-            &[],
-        );
+        self.update_descriptor_sets(&updates, &[]);
     }
 
     pub unsafe fn cmd_bind_descriptors(
@@ -478,16 +532,52 @@ impl Gpu {
             self.descriptors_buffer.gpu.set,
             self.descriptors_image.gpu.set,
             layout.samplers.set,
+            #[cfg(feature = "raytrace")]
             self.descriptors_accel.gpu.set,
         ];
-        self.cmd_bind_descriptor_sets(
-            cmd_buffer,
-            pipeline,
-            layout.pipeline_layout,
-            0,
-            &sets,
-            &[],
-        );
+        self.cmd_bind_descriptor_sets(cmd_buffer, pipeline, layout.pipeline_layout, 0, &sets, &[]);
+    }
+
+    pub unsafe fn cmd_barriers(
+        &mut self,
+        cmd_buffer: vk::CommandBuffer,
+        memory: &[gpu::MemoryBarrier],
+        image: &[gpu::ImageBarrier],
+    ) {
+        let memory_barriers = memory
+            .iter()
+            .map(|barrier| {
+                vk::MemoryBarrier2KHR::builder()
+                    .src_access_mask(barrier.src.access)
+                    .dst_access_mask(barrier.dst.access)
+                    .src_stage_mask(barrier.src.stage)
+                    .dst_stage_mask(barrier.dst.stage)
+                    .build()
+            })
+            .collect::<Box<[_]>>();
+
+        let image_barriers = image
+            .iter()
+            .map(|barrier| {
+                vk::ImageMemoryBarrier2KHR::builder()
+                    .image(barrier.image)
+                    .subresource_range(barrier.range)
+                    .old_layout(barrier.src.layout)
+                    .new_layout(barrier.dst.layout)
+                    .src_access_mask(barrier.src.access)
+                    .dst_access_mask(barrier.dst.access)
+                    .src_stage_mask(barrier.src.stage)
+                    .dst_stage_mask(barrier.dst.stage)
+                    .build()
+            })
+            .collect::<Box<[_]>>();
+
+        let dependency = vk::DependencyInfoKHR::builder()
+            .memory_barriers(&memory_barriers)
+            .image_memory_barriers(&image_barriers);
+        self.ext
+            .sync2
+            .cmd_pipeline_barrier2(cmd_buffer, &dependency);
     }
 }
 

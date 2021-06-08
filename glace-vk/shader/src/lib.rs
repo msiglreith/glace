@@ -3,7 +3,7 @@
 #![register_attr(spirv)]
 
 use glace::{f32x2, f32x3, f32x4, f32x4x4, geometry::Fullscreen, vec3, vec4};
-use spirv_std::bindless::{ArrayBuffer, Buffer, Sampler, SimpleBuffer, Texture2d};
+use spirv_std::{Sampler, Image2d, bindless::{resource_access, ArrayBuffer, Buffer, RenderResourceHandle, SimpleBuffer}};
 use spirv_std::num_traits::Float;
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -15,8 +15,9 @@ pub struct WorldData {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct InstanceData {
-    sampler: Sampler,
-    normal_map: Texture2d,
+    sampler: RenderResourceHandle,
+    albedo_map: RenderResourceHandle,
+    normal_map: RenderResourceHandle,
 }
 
 #[repr(C)]
@@ -70,7 +71,7 @@ pub fn mesh_vs(
 }
 
 #[spirv(fragment)]
-pub fn mesh_fs(
+pub unsafe fn mesh_fs(
     a_normal_world: f32x3,
     a_texcoord: f32x2,
     a_tangent_world: f32x4,
@@ -79,8 +80,10 @@ pub fn mesh_fs(
     #[spirv(push_constant)] constants: &Constants,
 ) {
     let instance_data = constants.instance.load();
-    let normal: f32x4 = instance_data
-        .normal_map
-        .sample(instance_data.sampler, a_texcoord);
+
+    let albedo: Image2d = instance_data.albedo_map.access();
+    let sampler: Sampler = instance_data.sampler.access();
+
+    let normal: f32x4 = albedo.sample(sampler, a_texcoord);
     *output = vec4(normal.x, normal.y, normal.z, 1.0);
 }

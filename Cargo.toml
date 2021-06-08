@@ -1,11 +1,8 @@
 [workspace]
 members = [
     "glace",
-    "glace-grr",
-    "glace-grr/shader",
     "glace-vk",
     "glace-vk/shader",
-    "glacier",
 ]
 
 [profile.release]
@@ -19,4 +16,5 @@ opt-level = 3
 codegen-units = 32
 
 [patch.crates-io]
-ash = { path = "../ash/ash" }
+ash = { git = "https://github.com/MaikKlein/ash.git" }
+ash-window = { git = "https://github.com/MaikKlein/ash.git" }

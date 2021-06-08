@@ -1,8 +1,11 @@
-use ash::{version::DeviceV1_0, vk};
+use ash::vk;
 use camera::{Camera, InputMap};
 use glace::{f32x4x4, vec3};
 use gpu_allocator::AllocationCreateDesc;
-use std::path::Path;
+use std::{
+    mem,
+    path::{Path, PathBuf},
+};
 use winit::{
     dpi::LogicalSize,
     event::{DeviceEvent, Event, WindowEvent},
@@ -35,7 +38,156 @@ struct GeometryData {
 #[derive(Debug)]
 struct InstanceData {
     sampler: u32,
+    albedo_map: gpu::CpuDescriptor,
     normal_map: gpu::CpuDescriptor,
+}
+
+unsafe fn load_png(
+    gpu: &mut gpu::Gpu,
+    pool: gpu::Pool,
+    path: PathBuf,
+    format: vk::Format,
+) -> anyhow::Result<(vk::Image, vk::ImageView, vk::Buffer)> {
+    let img = image::open(&Path::new(&path)).unwrap().to_rgba8();
+    let img_width = img.width();
+    let img_height = img.height();
+    let img_data = img.into_raw();
+
+    let desc = vk::ImageCreateInfo::builder()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(format)
+        .extent(vk::Extent3D {
+            width: img_width as _,
+            height: img_height as _,
+            depth: 1,
+        })
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST);
+
+    let name = path.to_str().unwrap();
+    let image = gpu.create_image(&desc, None)?;
+    let alloc_desc = AllocationCreateDesc {
+        name,
+        requirements: gpu.get_image_memory_requirements(image),
+        location: gpu_allocator::MemoryLocation::GpuOnly,
+        linear: false,
+    };
+    let allocation = gpu.allocator.allocate(&alloc_desc)?;
+    gpu.bind_image_memory(image, allocation.memory(), allocation.offset())?;
+
+    let desc = vk::BufferCreateInfo::builder()
+        .size(img_data.len() as _)
+        .usage(vk::BufferUsageFlags::TRANSFER_SRC);
+    let buffer = gpu.create_buffer(&desc, None)?;
+    let alloc_desc = AllocationCreateDesc {
+        name,
+        requirements: gpu.get_buffer_memory_requirements(buffer),
+        location: gpu_allocator::MemoryLocation::CpuToGpu,
+        linear: true,
+    };
+    let mut allocation = gpu.allocator.allocate(&alloc_desc)?;
+    {
+        let mapping = allocation.mapped_slice_mut().unwrap();
+        mapping[..img_data.len()].copy_from_slice(gpu::as_u8_slice(&img_data));
+    }
+    gpu.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
+
+    gpu.cmd_barriers(
+        pool.cmd_buffer,
+        &[],
+        &[gpu::ImageBarrier {
+            image,
+            range: vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+            src: gpu::ImageAccess {
+                access: gpu::Access::NONE,
+                stage: gpu::Stage::NONE,
+                layout: gpu::ImageLayout::UNDEFINED,
+            },
+            dst: gpu::ImageAccess {
+                access: gpu::Access::MEMORY_WRITE,
+                stage: gpu::Stage::COPY,
+                layout: gpu::ImageLayout::TRANSFER_DST_OPTIMAL,
+            },
+        }],
+    );
+
+    let copy = vk::BufferImageCopy {
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image_subresource: vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        },
+        image_extent: vk::Extent3D {
+            width: img_width as _,
+            height: img_height as _,
+            depth: 1,
+        },
+        image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+    };
+
+    gpu.cmd_copy_buffer_to_image(
+        pool.cmd_buffer,
+        buffer,
+        image,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        &[copy],
+    );
+
+    gpu.cmd_barriers(
+        pool.cmd_buffer,
+        &[],
+        &[gpu::ImageBarrier {
+            image,
+            range: vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+            src: gpu::ImageAccess {
+                access: gpu::Access::MEMORY_WRITE,
+                stage: gpu::Stage::COPY,
+                layout: gpu::ImageLayout::TRANSFER_DST_OPTIMAL,
+            },
+            dst: gpu::ImageAccess {
+                access: gpu::Access::MEMORY_READ,
+                stage: gpu::Stage::ALL_COMMANDS,
+                layout: gpu::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            },
+        }],
+    );
+
+    let view = {
+        let desc = vk::ImageViewCreateInfo::builder()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        gpu.create_image_view(&desc, None)?
+    };
+
+    Ok((image, view, buffer))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -88,7 +240,7 @@ fn main() -> anyhow::Result<()> {
             buffer
         };
 
-        let mesh_gpu = gpu.create_buffer_gpu::<u8>(
+        let mesh_gpu = gpu.create_buffer_gpu(
             "mesh gpu",
             bin.len(),
             gpu::BufferUsageFlags::STORAGE_BUFFER
@@ -97,28 +249,28 @@ fn main() -> anyhow::Result<()> {
                 | gpu::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         )?;
 
-        let world_pbr_gpu = gpu.create_buffer_gpu::<WorldPbr>(
+        let world_pbr_gpu = gpu.create_buffer_gpu(
             "pbr::world gpu",
-            1,
+            mem::size_of::<WorldPbr>(),
             gpu::BufferUsageFlags::STORAGE_BUFFER | gpu::BufferUsageFlags::TRANSFER_DST,
         )?;
 
-        let geometry_data_gpu = gpu.create_buffer_gpu::<GeometryData>(
+        let geometry_data_gpu = gpu.create_buffer_gpu(
             "pbr::geometry gpu",
-            1,
+            mem::size_of::<GeometryData>(),
             gpu::BufferUsageFlags::STORAGE_BUFFER | gpu::BufferUsageFlags::TRANSFER_DST,
         )?;
 
-        let instance_data_gpu = gpu.create_buffer_gpu::<InstanceData>(
+        let instance_data_gpu = gpu.create_buffer_gpu(
             "pbr::instance gpu",
-            1,
+            mem::size_of::<InstanceData>(),
             gpu::BufferUsageFlags::STORAGE_BUFFER | gpu::BufferUsageFlags::TRANSFER_DST,
         )?;
 
-        let upload_cmd_buffer = gpu.acquire_cmd_buffer().unwrap();
+        let upload_pool = gpu.acquire_pool().unwrap();
 
         gpu.cmd_copy_buffer(
-            upload_cmd_buffer,
+            upload_pool.cmd_buffer,
             mesh_cpu,
             mesh_gpu,
             &[vk::BufferCopy {
@@ -128,227 +280,62 @@ fn main() -> anyhow::Result<()> {
             }],
         );
 
-        let mut load_png = |name: &str,
-                            format: vk::Format,
-                            _downsample: bool|
-         -> anyhow::Result<(vk::Image, vk::ImageView, vk::Buffer)> {
-            let path = directory.join(name);
-            let img = image::open(&Path::new(&path)).unwrap().to_rgba8();
-            let img_width = img.width();
-            let img_height = img.height();
-            let img_data = img.into_raw();
-
-            let desc = vk::ImageCreateInfo::builder()
-                .image_type(vk::ImageType::TYPE_2D)
-                .format(format)
-                .extent(vk::Extent3D {
-                    width: img_width as _,
-                    height: img_height as _,
-                    depth: 1,
-                })
-                .mip_levels(1)
-                .array_layers(1)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST);
-
-            let image = gpu.create_image(&desc, None)?;
-            let alloc_desc = AllocationCreateDesc {
-                name,
-                requirements: gpu.get_image_memory_requirements(image),
-                location: gpu_allocator::MemoryLocation::GpuOnly,
-                linear: false,
-            };
-            let allocation = gpu.allocator.allocate(&alloc_desc)?;
-            gpu.bind_image_memory(image, allocation.memory(), allocation.offset())?;
-
-            let desc = vk::BufferCreateInfo::builder()
-                .size(img_data.len() as _)
-                .usage(vk::BufferUsageFlags::TRANSFER_SRC);
-            let buffer = gpu.create_buffer(&desc, None)?;
-            let alloc_desc = AllocationCreateDesc {
-                name,
-                requirements: gpu.get_buffer_memory_requirements(buffer),
-                location: gpu_allocator::MemoryLocation::CpuToGpu,
-                linear: true,
-            };
-            let mut allocation = gpu.allocator.allocate(&alloc_desc)?;
-            {
-                let mapping = allocation.mapped_slice_mut().unwrap();
-                mapping[..img_data.len()].copy_from_slice(gpu::as_u8_slice(&img_data));
-            }
-            gpu.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
-
-            // let pre_transfer_barrier = [vk::ImageMemoryBarrier2KHR::builder()
-            //     .image(image)
-            //     .subresource_range(vk::ImageSubresourceRange {
-            //         aspect_mask: vk::ImageAspectFlags::COLOR,
-            //         base_mip_level: 0,
-            //         level_count: 1,
-            //         base_array_layer: 0,
-            //         layer_count: 1,
-            //     })
-            //     .src_access_mask(vk::AccessFlags2KHR::ACCESS_2_NONE)
-            //     .src_stage_mask(vk::PipelineStageFlags2KHR::PIPELINE_STAGE_2_NONE)
-            //     .dst_access_mask(vk::AccessFlags2KHR::ACCESS_2_MEMORY_WRITE)
-            //     .dst_stage_mask(vk::PipelineStageFlags2KHR::PIPELINE_STAGE_2_COPY)
-            //     .old_layout(vk::ImageLayout::UNDEFINED)
-            //     .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            //     .build()];
-
-            // let pre_transfer_dep =
-            //     vk::DependencyInfoKHR::builder().image_memory_barriers(&pre_transfer_barrier);
-            // gpu.ext.sync2
-            //     .cmd_pipeline_barrier2(upload_cmd_buffer, &pre_transfer_dep);
-
-            let transfer_barrier = [
-                vk::ImageMemoryBarrier::builder()
-                    .image(image)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    })
-                    .src_access_mask(
-                        vk::AccessFlags::MEMORY_READ
-                            | vk::AccessFlags::MEMORY_WRITE,
-                    )
-                    .dst_access_mask(
-                        vk::AccessFlags::MEMORY_READ
-                            | vk::AccessFlags::MEMORY_WRITE,
-                    )
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .build()
-            ];
-            gpu.cmd_pipeline_barrier(
-                upload_cmd_buffer,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &transfer_barrier,
-            );
-
-            let copy = vk::BufferImageCopy {
-                buffer_offset: 0,
-                buffer_row_length: 0,
-                buffer_image_height: 0,
-                image_subresource: vk::ImageSubresourceLayers {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    mip_level: 0,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
-                image_extent: vk::Extent3D {
-                    width: img_width as _,
-                    height: img_height as _,
-                    depth: 1,
-                },
-                image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
-            };
-
-            gpu.cmd_copy_buffer_to_image(
-                upload_cmd_buffer,
-                buffer,
-                image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[copy],
-            );
-
-            let post_transfer_barrier = [vk::ImageMemoryBarrier::builder()
-                .image(image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                })
-                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .build()];
-            gpu.cmd_pipeline_barrier(
-                upload_cmd_buffer,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &post_transfer_barrier,
-            );
-
-            let view = {
-                let desc = vk::ImageViewCreateInfo::builder()
-                    .image(image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(format)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    });
-
-                gpu.create_image_view(&desc, None)?
-            };
-
-            Ok((image, view, buffer))
-        };
-
-        let (_albedo, albedo_view, _albedo_buffer) =
-            load_png("SciFiHelmet_BaseColor.png", vk::Format::R8G8B8A8_SRGB, true)?;
-        let (_normal, normal_view, _normal_buffer) =
-            load_png("SciFiHelmet_Normal.png", vk::Format::R8G8B8A8_UNORM, true)?;
+        let (_albedo, albedo_view, _albedo_buffer) = load_png(
+            &mut gpu,
+            upload_pool,
+            directory.join("SciFiHelmet_BaseColor.png"),
+            vk::Format::R8G8B8A8_SRGB,
+        )?;
+        let (_normal, normal_view, _normal_buffer) = load_png(
+            &mut gpu,
+            upload_pool,
+            directory.join("SciFiHelmet_Normal.png"),
+            vk::Format::R8G8B8A8_UNORM,
+        )?;
 
         // acceleration structure
         #[cfg(feature = "raytrace")]
         {
-            let geometry = [
-                vk::AccelerationStructureGeometryKHR::builder()
-                    .flags(vk::GeometryFlagsKHR::OPAQUE)
-                    .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
-                    .geometry(
-                        vk::AccelerationStructureGeometryDataKHR {
-                            triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::builder()
-                                .vertex_format(vk::Format::R32G32B32_SFLOAT)
-                                .vertex_data(vk::DeviceOrHostAddressConstKHR {
-                                    device_address: gpu.buffer_address(mesh_gpu) + num_vertex * 4,
-                                })
-                                .vertex_stride(12)
-                                .max_vertex(num_vertex as _)
-                                .index_type(vk::IndexType::UINT32)
-                                .index_data(vk::DeviceOrHostAddressConstKHR {
-                                    device_address: gpu.buffer_address(mesh_gpu),
-                                })
-                                .build()
-                        }
-                    )
-                    .build()
-            ];
+            let geometry = [vk::AccelerationStructureGeometryKHR::builder()
+                .flags(vk::GeometryFlagsKHR::OPAQUE)
+                .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+                .geometry(vk::AccelerationStructureGeometryDataKHR {
+                    triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::builder()
+                        .vertex_format(vk::Format::R32G32B32_SFLOAT)
+                        .vertex_data(vk::DeviceOrHostAddressConstKHR {
+                            device_address: gpu.buffer_address(mesh_gpu) + num_vertex * 4,
+                        })
+                        .vertex_stride(12)
+                        .max_vertex(num_vertex as _)
+                        .index_type(vk::IndexType::UINT32)
+                        .index_data(vk::DeviceOrHostAddressConstKHR {
+                            device_address: gpu.buffer_address(mesh_gpu),
+                        })
+                        .build(),
+                })
+                .build()];
             let primitives = [num_indices / 3];
             let build_geometry = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
                 .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
                 .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
                 .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
                 .geometries(&geometry);
-            let blas_size = gpu.ext.accel_structure.get_acceleration_structure_build_sizes(
-                vk::AccelerationStructureBuildTypeKHR::DEVICE,
-                &build_geometry,
-                &primitives,
-            );
+            let blas_size = gpu
+                .ext
+                .accel_structure
+                .get_acceleration_structure_build_sizes(
+                    vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                    &build_geometry,
+                    &primitives,
+                );
 
-            let blas_buffer = gpu.create_buffer_gpu::<u8>(
+            let blas_buffer = gpu.create_buffer_gpu(
                 "blas gpu",
                 blas_size.acceleration_structure_size as _,
                 gpu::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR,
             )?;
 
-            let blas_scratch_buffer = gpu.create_buffer_gpu::<u8>(
+            let blas_scratch_buffer = gpu.create_buffer_gpu(
                 "blas (scratch) gpu",
                 blas_size.build_scratch_size as _,
                 gpu::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
@@ -360,9 +347,9 @@ fn main() -> anyhow::Result<()> {
                     .offset(0)
                     .size(blas_size.acceleration_structure_size)
                     .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL);
-                gpu.ext.accel_structure.create_acceleration_structure(
-                    &desc, None
-                )?
+                gpu.ext
+                    .accel_structure
+                    .create_acceleration_structure(&desc, None)?
             };
 
             let build_geometry = [vk::AccelerationStructureBuildGeometryInfoKHR::builder()
@@ -374,16 +361,13 @@ fn main() -> anyhow::Result<()> {
                 })
                 .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
                 .geometries(&geometry)
-                .build()
-            ];
-            let build_range = [
-                vk::AccelerationStructureBuildRangeInfoKHR {
-                    primitive_count: num_indices / 3,
-                    primitive_offset: 0,
-                    first_vertex: 0,
-                    transform_offset: 0,
-                }
-            ];
+                .build()];
+            let build_range = [vk::AccelerationStructureBuildRangeInfoKHR {
+                primitive_count: num_indices / 3,
+                primitive_offset: 0,
+                first_vertex: 0,
+                transform_offset: 0,
+            }];
 
             gpu.ext.accel_structure.cmd_build_acceleration_structures(
                 upload_cmd_buffer,
@@ -392,24 +376,19 @@ fn main() -> anyhow::Result<()> {
             );
 
             // tlas
-            let tlas_instances = [
-                vk::AccelerationStructureInstanceKHR {
-                    transform: vk::TransformMatrixKHR {
-                        matrix: [
-                            1.0, 0.0, 0.0, 0.0,
-                            0.0, 1.0, 0.0, 0.0,
-                            0.0, 0.0, 1.0, 0.0,
-                        ]
-                    },
-                    instance_custom_index_and_mask: 0xFF,
-                    instance_shader_binding_table_record_offset_and_flags: 0,
-                    acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
-                        device_handle: gpu.acceleration_structure_address(blas),
-                    },
-                }
-            ];
+            let tlas_instances = [vk::AccelerationStructureInstanceKHR {
+                transform: vk::TransformMatrixKHR {
+                    matrix: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                },
+                instance_custom_index_and_mask: 0xFF,
+                instance_shader_binding_table_record_offset_and_flags: 0,
+                acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
+                    device_handle: gpu.acceleration_structure_address(blas),
+                },
+            }];
             let tlas_instances_buffer = {
-                let size = std::mem::size_of::<vk::AccelerationStructureInstanceKHR>() * tlas_instances.len();
+                let size = std::mem::size_of::<vk::AccelerationStructureInstanceKHR>()
+                    * tlas_instances.len();
                 let desc = vk::BufferCreateInfo::builder()
                     .size(size as _)
                     .usage(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
@@ -429,41 +408,40 @@ fn main() -> anyhow::Result<()> {
                 buffer
             };
 
-            let geometry = [
-                vk::AccelerationStructureGeometryKHR::builder()
-                    .flags(vk::GeometryFlagsKHR::OPAQUE)
-                    .geometry_type(vk::GeometryTypeKHR::INSTANCES)
-                    .geometry(
-                        vk::AccelerationStructureGeometryDataKHR {
-                            instances: vk::AccelerationStructureGeometryInstancesDataKHR::builder()
-                                .array_of_pointers(false)
-                                .data(vk::DeviceOrHostAddressConstKHR {
-                                    device_address: gpu.buffer_address(tlas_instances_buffer),
-                                })
-                                .build()
-                        }
-                    )
-                    .build()
-            ];
+            let geometry = [vk::AccelerationStructureGeometryKHR::builder()
+                .flags(vk::GeometryFlagsKHR::OPAQUE)
+                .geometry_type(vk::GeometryTypeKHR::INSTANCES)
+                .geometry(vk::AccelerationStructureGeometryDataKHR {
+                    instances: vk::AccelerationStructureGeometryInstancesDataKHR::builder()
+                        .array_of_pointers(false)
+                        .data(vk::DeviceOrHostAddressConstKHR {
+                            device_address: gpu.buffer_address(tlas_instances_buffer),
+                        })
+                        .build(),
+                })
+                .build()];
             let primitives = [1];
             let build_geometry = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
                 .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
                 .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
                 .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
                 .geometries(&geometry);
-            let tlas_size = gpu.ext.accel_structure.get_acceleration_structure_build_sizes(
-                vk::AccelerationStructureBuildTypeKHR::DEVICE,
-                &build_geometry,
-                &primitives,
-            );
+            let tlas_size = gpu
+                .ext
+                .accel_structure
+                .get_acceleration_structure_build_sizes(
+                    vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                    &build_geometry,
+                    &primitives,
+                );
 
-            let tlas_buffer = gpu.create_buffer_gpu::<u8>(
+            let tlas_buffer = gpu.create_buffer_gpu(
                 "tlas gpu",
                 tlas_size.acceleration_structure_size as _,
                 gpu::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR,
             )?;
 
-            let tlas_scratch_buffer = gpu.create_buffer_gpu::<u8>(
+            let tlas_scratch_buffer = gpu.create_buffer_gpu(
                 "tlas (scratch) gpu",
                 tlas_size.build_scratch_size as _,
                 gpu::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
@@ -475,9 +453,9 @@ fn main() -> anyhow::Result<()> {
                     .offset(0)
                     .size(tlas_size.acceleration_structure_size)
                     .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL);
-                gpu.ext.accel_structure.create_acceleration_structure(
-                    &desc, None
-                )?
+                gpu.ext
+                    .accel_structure
+                    .create_acceleration_structure(&desc, None)?
             };
 
             let build_geometry = [vk::AccelerationStructureBuildGeometryInfoKHR::builder()
@@ -489,16 +467,13 @@ fn main() -> anyhow::Result<()> {
                 })
                 .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
                 .geometries(&geometry)
-                .build()
-            ];
-            let build_range = [
-                vk::AccelerationStructureBuildRangeInfoKHR {
-                    primitive_count: 1,
-                    primitive_offset: 0,
-                    first_vertex: 0,
-                    transform_offset: 0,
-                }
-            ];
+                .build()];
+            let build_range = [vk::AccelerationStructureBuildRangeInfoKHR {
+                primitive_count: 1,
+                primitive_offset: 0,
+                first_vertex: 0,
+                transform_offset: 0,
+            }];
 
             gpu.ext.accel_structure.cmd_build_acceleration_structures(
                 upload_cmd_buffer,
@@ -508,17 +483,15 @@ fn main() -> anyhow::Result<()> {
 
             let tlas_handle = gpu.descriptors_accel.create();
 
-            let accel_info = [
-                gpu::AccelerationStructureDescriptor {
-                    handle: tlas_handle,
-                    acceleration_structure: tlas,
-                },
-            ];
+            let accel_info = [gpu::AccelerationStructureDescriptor {
+                handle: tlas_handle,
+                acceleration_structure: tlas,
+            }];
             gpu.update_descriptors(&[], &[], &accel_info);
         }
 
-        gpu.end_command_buffer(upload_cmd_buffer)?;
-        let upload_buffers = [upload_cmd_buffer];
+        gpu.end_command_buffer(upload_pool.cmd_buffer)?;
+        let upload_buffers = [upload_pool.cmd_buffer];
         let upload_submit = vk::SubmitInfo::builder()
             .command_buffers(&upload_buffers)
             .build();
@@ -605,16 +578,20 @@ fn main() -> anyhow::Result<()> {
             gpu.create_render_pass(&desc, None)?
         };
 
-        let mesh_fbos = wsi.frame_rtvs.iter().map(|rtv| {
-            let attachments = [*rtv, depth_stencil_view];
-            let desc = vk::FramebufferCreateInfo::builder()
-                .render_pass(mesh_pass)
-                .width(size.width as _)
-                .height(size.height as _)
-                .layers(1)
-                .attachments(&attachments);
-            gpu.create_framebuffer(&desc, None)
-        }).collect::<Result<Vec<_>, _>>()?;
+        let mesh_fbos = wsi
+            .frame_rtvs
+            .iter()
+            .map(|rtv| {
+                let attachments = [*rtv, depth_stencil_view];
+                let desc = vk::FramebufferCreateInfo::builder()
+                    .render_pass(mesh_pass)
+                    .width(size.width as _)
+                    .height(size.height as _)
+                    .layers(1)
+                    .attachments(&attachments);
+                gpu.create_framebuffer(&desc, None)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mesh_sampler = {
             let desc = vk::SamplerCreateInfo::builder(); // TODO: linear
@@ -633,7 +610,6 @@ fn main() -> anyhow::Result<()> {
 
         let albedo_srv_handle = gpu.descriptors_image.create();
         let normal_srv_handle = gpu.descriptors_image.create();
-
 
         {
             let base_offset = num_indices as u64 * 4;
@@ -826,7 +802,7 @@ fn main() -> anyhow::Result<()> {
                     input.reset_delta();
 
                     let image_index = wsi.acquire().unwrap();
-                    let main_cmd_buffer = gpu.acquire_cmd_buffer().unwrap();
+                    let pool = gpu.acquire_pool().unwrap();
 
                     let size = window.inner_size();
                     let aspect = size.width as f32 / size.height as f32;
@@ -844,17 +820,18 @@ fn main() -> anyhow::Result<()> {
                         ),
                     }];
                     gpu.cmd_update_buffer(
-                        main_cmd_buffer,
+                        pool.cmd_buffer,
                         world_pbr_gpu,
                         0,
                         gpu::as_u8_slice(&world),
                     );
                     let instance = [InstanceData {
                         sampler: 0,
+                        albedo_map: albedo_srv_handle,
                         normal_map: normal_srv_handle,
                     }];
                     gpu.cmd_update_buffer(
-                        main_cmd_buffer,
+                        pool.cmd_buffer,
                         instance_data_gpu,
                         0,
                         gpu::as_u8_slice(&instance),
@@ -867,55 +844,22 @@ fn main() -> anyhow::Result<()> {
                         v_tangent_obj: mesh_tangent_handle,
                     }];
                     gpu.cmd_update_buffer(
-                        main_cmd_buffer,
+                        pool.cmd_buffer,
                         geometry_data_gpu,
                         0,
                         gpu::as_u8_slice(&draw_params),
                     );
 
-                    // let mem_barrier = [vk::MemoryBarrier2KHR::builder()
-                    //     .src_access_mask(
-                    //         vk::AccessFlags2KHR::ACCESS_2_MEMORY_READ
-                    //             | vk::AccessFlags2KHR::ACCESS_2_MEMORY_WRITE,
-                    //     )
-                    //     .dst_access_mask(
-                    //         vk::AccessFlags2KHR::ACCESS_2_MEMORY_READ
-                    //             | vk::AccessFlags2KHR::ACCESS_2_MEMORY_WRITE,
-                    //     )
-                    //     .src_stage_mask(vk::PipelineStageFlags2KHR::PIPELINE_STAGE_2_ALL_COMMANDS)
-                    //     .dst_stage_mask(vk::PipelineStageFlags2KHR::PIPELINE_STAGE_2_ALL_COMMANDS)
-                    //     .build()];
-                    // let full_barrier_dep =
-                    //     vk::DependencyInfoKHR::builder().memory_barriers(&mem_barrier);
-                    // gpu.ext.sync2
-                    //     .cmd_pipeline_barrier2(main_cmd_buffer, &full_barrier_dep);
-
-                    let mem_barrier = [
-                        vk::MemoryBarrier::builder()
-                            .src_access_mask(
-                                vk::AccessFlags::MEMORY_READ
-                                    | vk::AccessFlags::MEMORY_WRITE,
-                            )
-                            .dst_access_mask(
-                                vk::AccessFlags::MEMORY_READ
-                                    | vk::AccessFlags::MEMORY_WRITE,
-                            )
-                            .build()
-                    ];
-                    gpu.cmd_pipeline_barrier(
-                        main_cmd_buffer,
-                        vk::PipelineStageFlags::ALL_COMMANDS,
-                        vk::PipelineStageFlags::ALL_COMMANDS,
-                        vk::DependencyFlags::empty(),
-                        &mem_barrier,
-                        &[],
+                    gpu.cmd_barriers(
+                        pool.cmd_buffer,
+                        &[gpu::MemoryBarrier::full()],
                         &[],
                     );
 
                     let clear_values = [
                         vk::ClearValue {
                             color: vk::ClearColorValue {
-                                float32: [0.0, 0.0, 0.0, 0.0],
+                                float32: [0.5, 0.5, 0.5, 1.0],
                             },
                         },
                         vk::ClearValue {
@@ -939,18 +883,18 @@ fn main() -> anyhow::Result<()> {
                         .clear_values(&clear_values);
 
                     gpu.cmd_begin_render_pass(
-                        main_cmd_buffer,
+                        pool.cmd_buffer,
                         &mesh_pass_begin_desc,
                         vk::SubpassContents::INLINE,
                     );
-                    gpu.cmd_bind_index_buffer(main_cmd_buffer, mesh_gpu, 0, vk::IndexType::UINT32);
+                    gpu.cmd_bind_index_buffer(pool.cmd_buffer, mesh_gpu, 0, vk::IndexType::UINT32);
                     gpu.cmd_bind_pipeline(
-                        main_cmd_buffer,
+                        pool.cmd_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
                         mesh_pipeline[0],
                     );
                     gpu.cmd_set_scissor(
-                        main_cmd_buffer,
+                        pool.cmd_buffer,
                         0,
                         &[vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
@@ -961,7 +905,7 @@ fn main() -> anyhow::Result<()> {
                         }],
                     );
                     gpu.cmd_set_viewport(
-                        main_cmd_buffer,
+                        pool.cmd_buffer,
                         0,
                         &[vk::Viewport {
                             x: 0.0,
@@ -973,28 +917,28 @@ fn main() -> anyhow::Result<()> {
                         }],
                     );
                     gpu.cmd_bind_descriptors(
-                        main_cmd_buffer,
+                        pool.cmd_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
                         mesh_layout,
                     );
 
                     let constants = [world_pbr_handle, geometry_data_handle, instance_data_handle];
                     gpu.cmd_push_constants(
-                        main_cmd_buffer,
+                        pool.cmd_buffer,
                         mesh_layout.pipeline_layout,
                         vk::ShaderStageFlags::ALL,
                         0,
                         gpu::as_u8_slice(&constants),
                     );
-                    gpu.cmd_draw_indexed(main_cmd_buffer, num_indices as _, 1, 0, 0, 0);
-                    gpu.cmd_end_render_pass(main_cmd_buffer);
+                    gpu.cmd_draw_indexed(pool.cmd_buffer, num_indices as _, 1, 0, 0, 0);
+                    gpu.cmd_end_render_pass(pool.cmd_buffer);
 
-                    gpu.end_command_buffer(main_cmd_buffer).unwrap();
+                    gpu.end_command_buffer(pool.cmd_buffer).unwrap();
 
                     let main_waits = [wsi.frame_semaphores[image_index]];
                     let main_signals = [gpu.timeline, render_semaphores[frame_local]];
                     let main_stages = [vk::PipelineStageFlags::BOTTOM_OF_PIPE]; // TODO
-                    let main_buffers = [main_cmd_buffer];
+                    let main_buffers = [pool.cmd_buffer];
 
                     let main_waits_values = [0];
                     let main_signals_values = [frame_index as u64 + 1, 0];

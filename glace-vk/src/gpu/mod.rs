@@ -1,14 +1,17 @@
+mod descriptor;
 mod device;
 mod instance;
 mod swapchain;
-mod descriptor;
 
-pub use self::device::{DescriptorsDesc, Gpu};
+pub use self::descriptor::{CpuDescriptor, Descriptors};
+pub use self::device::{DescriptorsDesc, Gpu, Pool};
 pub use self::instance::Instance;
 pub use self::swapchain::Swapchain;
-pub use self::descriptor::{CpuDescriptor, Descriptors};
 
-pub use ash::vk::{Buffer, BufferUsageFlags, ImageView, ImageLayout, AccelerationStructureKHR as AccelerationStructure};
+pub use ash::vk::{
+    AccelerationStructureKHR as AccelerationStructure, AccessFlags2KHR as Access, Buffer,
+    BufferUsageFlags, Image, ImageLayout, ImageView, PipelineStageFlags2KHR as Stage,
+};
 
 use ash::vk;
 
@@ -52,4 +55,48 @@ pub struct ImageDescriptor {
 pub struct AccelerationStructureDescriptor {
     pub handle: CpuDescriptor,
     pub acceleration_structure: AccelerationStructure,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct MemoryAccess {
+    pub access: Access,
+    pub stage: Stage,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct MemoryBarrier {
+    pub src: MemoryAccess,
+    pub dst: MemoryAccess,
+}
+
+impl MemoryBarrier {
+    pub fn full() -> Self {
+        MemoryBarrier {
+            src: MemoryAccess {
+                access: Access::MEMORY_READ
+                    | Access::MEMORY_WRITE,
+                stage: Stage::ALL_COMMANDS,
+            },
+            dst: MemoryAccess {
+                access: Access::MEMORY_READ
+                    | Access::MEMORY_WRITE,
+                stage: Stage::ALL_COMMANDS,
+            }
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ImageAccess {
+    pub access: Access,
+    pub stage: Stage,
+    pub layout: ImageLayout,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ImageBarrier {
+    pub image: Image,
+    pub range: vk::ImageSubresourceRange,
+    pub src: ImageAccess,
+    pub dst: ImageAccess,
 }

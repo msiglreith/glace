@@ -9,7 +9,7 @@ workspace = ".."
 raytrace = []
 
 [dependencies]
-ash = "0.32"
+ash = "=0.32.0"
 ash-window = "0.6"
 winit = "0.24"
 byteorder = "1"

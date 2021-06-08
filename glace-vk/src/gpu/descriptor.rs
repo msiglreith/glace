@@ -1,5 +1,5 @@
-use glace::std::bindless::RenderResourceTag;
 use crate::gpu::GpuDescriptors;
+use glace::std::bindless::RenderResourceTag;
 
 pub use glace::std::bindless::RenderResourceHandle as CpuDescriptor;
 

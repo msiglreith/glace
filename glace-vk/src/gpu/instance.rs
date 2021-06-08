@@ -1,9 +1,5 @@
-use ash::{
-    extensions::khr,
-    version::{EntryV1_0, InstanceV1_0},
-    vk,
-};
-use std::ffi::CStr;
+use ash::{extensions::khr, vk};
+// use std::ffi::CStr;
 
 pub struct Instance {
     #[allow(dead_code)]
@@ -14,7 +10,7 @@ pub struct Instance {
     pub physical_device: ash::vk::PhysicalDevice,
     pub device_id: usize,
     pub family_index: u32,
-    device_extensions: Vec<vk::ExtensionProperties>,
+    // device_extensions: Vec<vk::ExtensionProperties>,
 }
 
 impl Instance {
@@ -57,7 +53,7 @@ impl Instance {
             })
             .unwrap();
 
-        let device_extensions = instance.enumerate_device_extension_properties(physical_device)?;
+        // let device_extensions = instance.enumerate_device_extension_properties(physical_device)?;
 
         Ok(Instance {
             entry,
@@ -67,13 +63,13 @@ impl Instance {
             physical_device,
             device_id,
             family_index,
-            device_extensions,
+            // device_extensions,
         })
     }
 
-    pub unsafe fn supports_extension(&self, extension: &CStr) -> bool {
-        self.device_extensions
-            .iter()
-            .any(|ext| CStr::from_ptr(ext.extension_name.as_ptr()) == extension)
-    }
+    // pub unsafe fn supports_extension(&self, extension: &CStr) -> bool {
+    //     self.device_extensions
+    //         .iter()
+    //         .any(|ext| CStr::from_ptr(ext.extension_name.as_ptr()) == extension)
+    // }
 }

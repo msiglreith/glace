@@ -1,5 +1,5 @@
 use crate::gpu::{Gpu, Instance};
-use ash::{extensions::khr, prelude::*, version::DeviceV1_0, vk};
+use ash::{extensions::khr, prelude::*, vk};
 
 pub struct Swapchain {
     device_id: usize,
