@@ -1,12 +1,12 @@
 use crate::gpu;
-use ash::{extensions::khr, vk};
+use ash::{extensions::khr, vk, prelude::*};
 use glace::std::bindless::RenderResourceTag;
 use gpu_allocator::{VulkanAllocator, VulkanAllocatorCreateDesc};
 
 const NUM_LAYOUTS: u32 = 64;
 
 pub struct Extensions {
-    pub sync2: khr::Synchronization2,
+    pub sync2: Option<khr::Synchronization2>, // not supported by Nsight
     #[cfg(feature = "raytrace")]
     pub accel_structure: khr::AccelerationStructure,
     #[cfg(feature = "raytrace")]
@@ -35,7 +35,7 @@ struct PoolData {
 
 #[derive(Copy, Clone, Debug)]
 pub struct Pool {
-    pub frame_id: usize,
+    pub id: usize,
     pub cmd_buffer: vk::CommandBuffer,
 }
 
@@ -48,7 +48,6 @@ pub struct Gpu {
     pub descriptor_pool: vk::DescriptorPool,
     pub descriptors_buffer: gpu::Descriptors,
     pub descriptors_image: gpu::Descriptors,
-    #[cfg(feature = "raytrace")]
     pub descriptors_accel: gpu::Descriptors,
     pub ext: Extensions,
     frame_id: usize,
@@ -66,11 +65,15 @@ impl Gpu {
         frame_buffering: usize,
         descriptors: DescriptorsDesc,
     ) -> anyhow::Result<Self> {
+        let supports_sync2 = instance.supports_extension(khr::Synchronization2::name()) && !cfg!(feature = "nsight");
+
         let (device, queue) = {
             let mut device_extensions = vec![
                 khr::Swapchain::name().as_ptr(),
-                khr::Synchronization2::name().as_ptr(),
             ];
+            if supports_sync2 {
+                device_extensions.push(khr::Synchronization2::name().as_ptr());
+            }
 
             if cfg!(feature = "raytrace") {
                 device_extensions.extend(&[
@@ -91,6 +94,7 @@ impl Gpu {
                 .runtime_descriptor_array(true)
                 .shader_storage_buffer_array_non_uniform_indexing(true)
                 .descriptor_binding_storage_buffer_update_after_bind(true)
+                .shader_int8(true) // required as rust-gpu forcefully sets it
                 .vulkan_memory_model(true);
             let mut features_sync2 =
                 vk::PhysicalDeviceSynchronization2FeaturesKHR::builder().synchronization2(true);
@@ -128,7 +132,7 @@ impl Gpu {
         };
 
         // extensions
-        let ext_sync2 = khr::Synchronization2::new(&instance.instance, &device);
+        let ext_sync2 = supports_sync2.then(|| khr::Synchronization2::new(&instance.instance, &device));
 
         #[cfg(feature = "raytrace")]
         let ext_accel_structure = khr::AccelerationStructure::new(&instance.instance, &device);
@@ -223,8 +227,7 @@ impl Gpu {
                 .push_next(&mut flag_desc);
             device.create_descriptor_set_layout(&desc, None)?
         };
-        #[cfg(feature = "raytrace")]
-        let acceleration_structure_layout = {
+        let acceleration_structure_layout = if cfg!(feature = "raytrace") {
             let binding_flags = [vk::DescriptorBindingFlags::PARTIALLY_BOUND; 1];
             let mut flag_desc = vk::DescriptorSetLayoutBindingFlagsCreateInfo::builder()
                 .binding_flags(&binding_flags);
@@ -241,13 +244,23 @@ impl Gpu {
                 .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
                 .push_next(&mut flag_desc);
             device.create_descriptor_set_layout(&desc, None)?
+        } else {
+            // dummy layout
+            let bindings = [vk::DescriptorSetLayoutBinding::builder()
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .binding(0)
+                .descriptor_count(0)
+                .stage_flags(vk::ShaderStageFlags::ALL)
+                .build()];
+            let desc = vk::DescriptorSetLayoutCreateInfo::builder()
+                .bindings(&bindings);
+            device.create_descriptor_set_layout(&desc, None)?
         };
 
         let sets = {
             let layouts = [
                 buffer_layout,
                 sampled_image_layout,
-                #[cfg(feature = "raytrace")]
                 acceleration_structure_layout,
             ];
 
@@ -280,7 +293,6 @@ impl Gpu {
         let descriptors_image =
             gpu::Descriptors::new(RenderResourceTag::Texture, descriptors.images, gpu_images);
 
-        #[cfg(feature = "raytrace")]
         let descriptors_accel = {
             let gpu_accel = gpu::GpuDescriptors {
                 layout: acceleration_structure_layout,
@@ -302,7 +314,6 @@ impl Gpu {
             descriptor_pool,
             descriptors_buffer,
             descriptors_image,
-            #[cfg(feature = "raytrace")]
             descriptors_accel,
             ext: Extensions {
                 sync2: ext_sync2,
@@ -380,7 +391,6 @@ impl Gpu {
             self.descriptors_buffer.gpu.layout,
             self.descriptors_image.gpu.layout,
             sampler_layout,
-            #[cfg(feature = "raytrace")]
             self.descriptors_accel.gpu.layout,
         ];
         let push_constants = [vk::PushConstantRange::builder()
@@ -434,12 +444,83 @@ impl Gpu {
 
         let pool_handle = Pool {
             cmd_buffer,
-            frame_id: self.frame_id,
+            id: self.frame_id,
         };
 
         self.frame_id += 1;
 
         Ok(pool_handle)
+    }
+
+    pub unsafe fn submit_pool(&mut self, pool: Pool, submit: gpu::Submit) -> VkResult<()> {
+        self.device.end_command_buffer(pool.cmd_buffer)?;
+
+        match self.ext.sync2 {
+            Some(ref sync2) => {
+                let waits = submit.waits.iter().map(|desc| {
+                    vk::SemaphoreSubmitInfoKHR::builder()
+                        .semaphore(desc.semaphore)
+                        .stage_mask(desc.stage)
+                        .build()
+                }).collect::<Box<[_]>>();
+
+                let mut signals = submit.signals.iter().map(|desc| {
+                    vk::SemaphoreSubmitInfoKHR::builder()
+                        .semaphore(desc.semaphore)
+                        .stage_mask(desc.stage)
+                        .build()
+                }).collect::<Vec<_>>();
+                signals.push(
+                    vk::SemaphoreSubmitInfoKHR::builder()
+                        .semaphore(self.timeline)
+                        .value(pool.id as u64 + 1)
+                        .stage_mask(gpu::Stage::NONE)
+                        .build()
+                );
+
+                let cmd_buffers = [
+                    vk::CommandBufferSubmitInfoKHR::builder()
+                        .command_buffer(pool.cmd_buffer)
+                        .build()
+                ];
+
+                let desc = [
+                    vk::SubmitInfo2KHR::builder()
+                        .wait_semaphore_infos(&waits)
+                        .signal_semaphore_infos(&signals)
+                        .command_buffer_infos(&cmd_buffers)
+                        .build()
+                ];
+                sync2.queue_submit2(self.queue, &desc, vk::Fence::null())
+            }
+            None => {
+                let waits = submit.waits.iter().map(|desc| desc.semaphore).collect::<Box<[_]>>();
+                let wait_stages = submit.waits.iter().map(|desc| map_stage(SyncScope::Second, desc.stage)).collect::<Box<[_]>>();
+                let mut signals = submit.signals.iter().map(|desc| desc.semaphore).collect::<Vec<_>>();
+                let cmd_buffer = [pool.cmd_buffer];
+
+                let wait_values = vec![0; waits.len()];
+                let mut signal_values = vec![0; signals.len()];
+
+                signals.push(self.timeline);
+                signal_values.push(pool.id as u64 + 1);
+
+                let mut timeline_desc = vk::TimelineSemaphoreSubmitInfo::builder()
+                    .wait_semaphore_values(&wait_values)
+                    .signal_semaphore_values(&signal_values);
+
+                let desc = [
+                    vk::SubmitInfo::builder()
+                        .wait_semaphores(&waits)
+                        .command_buffers(&cmd_buffer)
+                        .wait_dst_stage_mask(&wait_stages)
+                        .signal_semaphores(&signals)
+                        .push_next(&mut timeline_desc)
+                        .build()
+                ];
+                self.queue_submit(self.queue, &desc, vk::Fence::null())
+            }
+        }
     }
 
     pub unsafe fn update_descriptors(
@@ -532,7 +613,6 @@ impl Gpu {
             self.descriptors_buffer.gpu.set,
             self.descriptors_image.gpu.set,
             layout.samplers.set,
-            #[cfg(feature = "raytrace")]
             self.descriptors_accel.gpu.set,
         ];
         self.cmd_bind_descriptor_sets(cmd_buffer, pipeline, layout.pipeline_layout, 0, &sets, &[]);
@@ -544,40 +624,89 @@ impl Gpu {
         memory: &[gpu::MemoryBarrier],
         image: &[gpu::ImageBarrier],
     ) {
-        let memory_barriers = memory
-            .iter()
-            .map(|barrier| {
-                vk::MemoryBarrier2KHR::builder()
-                    .src_access_mask(barrier.src.access)
-                    .dst_access_mask(barrier.dst.access)
-                    .src_stage_mask(barrier.src.stage)
-                    .dst_stage_mask(barrier.dst.stage)
-                    .build()
-            })
-            .collect::<Box<[_]>>();
+        match self.ext.sync2 {
+            Some(ref sync2) => {
+                let memory_barriers = memory
+                    .iter()
+                    .map(|barrier| {
+                        vk::MemoryBarrier2KHR::builder()
+                            .src_access_mask(barrier.src.access)
+                            .dst_access_mask(barrier.dst.access)
+                            .src_stage_mask(barrier.src.stage)
+                            .dst_stage_mask(barrier.dst.stage)
+                            .build()
+                    })
+                    .collect::<Box<[_]>>();
 
-        let image_barriers = image
-            .iter()
-            .map(|barrier| {
-                vk::ImageMemoryBarrier2KHR::builder()
-                    .image(barrier.image)
-                    .subresource_range(barrier.range)
-                    .old_layout(barrier.src.layout)
-                    .new_layout(barrier.dst.layout)
-                    .src_access_mask(barrier.src.access)
-                    .dst_access_mask(barrier.dst.access)
-                    .src_stage_mask(barrier.src.stage)
-                    .dst_stage_mask(barrier.dst.stage)
-                    .build()
-            })
-            .collect::<Box<[_]>>();
+                let image_barriers = image
+                    .iter()
+                    .map(|barrier| {
+                        vk::ImageMemoryBarrier2KHR::builder()
+                            .image(barrier.image)
+                            .subresource_range(barrier.range)
+                            .old_layout(barrier.src.layout)
+                            .new_layout(barrier.dst.layout)
+                            .src_access_mask(barrier.src.access)
+                            .dst_access_mask(barrier.dst.access)
+                            .src_stage_mask(barrier.src.stage)
+                            .dst_stage_mask(barrier.dst.stage)
+                            .build()
+                    })
+                    .collect::<Box<[_]>>();
 
-        let dependency = vk::DependencyInfoKHR::builder()
-            .memory_barriers(&memory_barriers)
-            .image_memory_barriers(&image_barriers);
-        self.ext
-            .sync2
-            .cmd_pipeline_barrier2(cmd_buffer, &dependency);
+                let dependency = vk::DependencyInfoKHR::builder()
+                    .memory_barriers(&memory_barriers)
+                    .image_memory_barriers(&image_barriers);
+                sync2.cmd_pipeline_barrier2(cmd_buffer, &dependency);
+            }
+            None => {
+                let mut src_stage = vk::PipelineStageFlags::empty();
+                let mut dst_stage = vk::PipelineStageFlags::empty();
+
+                let mut memory_src_access = vk::AccessFlags::empty();
+                let mut memory_dst_access = vk::AccessFlags::empty();
+                for barrier in memory {
+                    src_stage |= map_stage(SyncScope::First, barrier.src.stage);
+                    dst_stage |= map_stage(SyncScope::Second, barrier.dst.stage);
+
+                    memory_src_access |= map_access(barrier.src.access);
+                    memory_dst_access |= map_access(barrier.dst.access);
+                }
+
+                let mut image_barriers = Vec::new();
+                for barrier in image {
+                    src_stage |= map_stage(SyncScope::First, barrier.src.stage);
+                    dst_stage |= map_stage(SyncScope::Second, barrier.dst.stage);
+
+                    image_barriers.push(vk::ImageMemoryBarrier::builder()
+                        .src_access_mask(map_access(barrier.src.access))
+                        .dst_access_mask(map_access(barrier.dst.access))
+                        .old_layout(barrier.src.layout)
+                        .new_layout(barrier.dst.layout)
+                        .image(barrier.image)
+                        .subresource_range(barrier.range)
+                        .build()
+                    );
+                }
+
+                let mut memory_barrier = vec![];
+                if !(memory_src_access.is_empty() && memory_dst_access.is_empty()) {
+                    memory_barrier.push(vk::MemoryBarrier::builder()
+                        .src_access_mask(memory_src_access)
+                        .dst_access_mask(memory_dst_access)
+                        .build());
+                }
+                self.cmd_pipeline_barrier(
+                    cmd_buffer,
+                    src_stage,
+                    dst_stage,
+                    vk::DependencyFlags::empty(),
+                    &memory_barrier,
+                    &[],
+                    &image_barriers,
+                );
+            }
+        }
     }
 }
 
@@ -586,4 +715,52 @@ impl std::ops::Deref for Gpu {
     fn deref(&self) -> &Self::Target {
         &self.device
     }
+}
+
+impl std::ops::Drop for Gpu {
+    fn drop(&mut self) {
+        unsafe {
+            self.device_wait_idle().unwrap();
+        }
+    }
+}
+
+enum SyncScope {
+    First,
+    Second,
+}
+
+fn map_stage(scope: SyncScope, stage: gpu::Stage) -> vk::PipelineStageFlags {
+    let mut stage_flags = vk::PipelineStageFlags::from_raw((stage.as_raw() & 0x7fffffff) as _);
+
+    if stage == gpu::Stage::NONE {
+        stage_flags |= match scope {
+            SyncScope::First => vk::PipelineStageFlags::TOP_OF_PIPE,
+            SyncScope::Second => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+        };
+    }
+
+    if stage.intersects(gpu::Stage::COPY | gpu::Stage::RESOLVE | gpu::Stage::BLIT | gpu::Stage::CLEAR) {
+        stage_flags |= vk::PipelineStageFlags::TRANSFER;
+    }
+    if stage.intersects(gpu::Stage::INDEX_INPUT | gpu::Stage::VERTEX_ATTRIBUTE_INPUT) {
+        stage_flags |= vk::PipelineStageFlags::VERTEX_INPUT;
+    }
+
+    // todo: pre-rasterization
+
+    stage_flags
+}
+
+fn map_access(access: gpu::Access) -> vk::AccessFlags {
+    let mut access_flags = vk::AccessFlags::from_raw((access.as_raw() & 0x7fffffff) as _);
+
+    if access.contains(gpu::Access::SHADER_STORAGE_WRITE) {
+        access_flags |= vk::AccessFlags::SHADER_WRITE;
+    }
+    if access.intersects(gpu::Access::SHADER_STORAGE_READ | gpu::Access::SHADER_SAMPLED_READ) {
+        access_flags |= vk::AccessFlags::SHADER_READ;
+    }
+
+    access_flags
 }

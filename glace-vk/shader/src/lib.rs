@@ -3,7 +3,7 @@
 #![register_attr(spirv)]
 
 use glace::{f32x2, f32x3, f32x4, f32x4x4, geometry::Fullscreen, vec3, vec4};
-use spirv_std::{Sampler, Image2d, bindless::{resource_access, ArrayBuffer, Buffer, RenderResourceHandle, SimpleBuffer}};
+use spirv_std::{Sampler, image::Image2d, bindless::{resource_access, ArrayBuffer, Buffer, RenderResourceHandle, SimpleBuffer}};
 use spirv_std::num_traits::Float;
 #[repr(C)]
 #[derive(Copy, Clone)]

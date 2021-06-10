@@ -370,7 +370,7 @@ fn main() -> anyhow::Result<()> {
             }];
 
             gpu.ext.accel_structure.cmd_build_acceleration_structures(
-                upload_cmd_buffer,
+                upload_pool.cmd_buffer,
                 &build_geometry,
                 &[&build_range],
             );
@@ -476,7 +476,7 @@ fn main() -> anyhow::Result<()> {
             }];
 
             gpu.ext.accel_structure.cmd_build_acceleration_structures(
-                upload_cmd_buffer,
+                upload_pool.cmd_buffer,
                 &build_geometry,
                 &[&build_range],
             );
@@ -490,12 +490,10 @@ fn main() -> anyhow::Result<()> {
             gpu.update_descriptors(&[], &[], &accel_info);
         }
 
-        gpu.end_command_buffer(upload_pool.cmd_buffer)?;
-        let upload_buffers = [upload_pool.cmd_buffer];
-        let upload_submit = vk::SubmitInfo::builder()
-            .command_buffers(&upload_buffers)
-            .build();
-        gpu.queue_submit(gpu.queue, &[upload_submit], vk::Fence::null())?;
+        gpu.submit_pool(upload_pool, gpu::Submit {
+            waits: &[],
+            signals: &[],
+        }).unwrap();
 
         let depth_stencil_format = vk::Format::D32_SFLOAT;
         let depth_stencil_image = {
@@ -762,17 +760,8 @@ fn main() -> anyhow::Result<()> {
                 .unwrap()
         };
 
-        let render_semaphores = (0..frames_in_flight)
-            .map(|_| {
-                let desc = vk::SemaphoreCreateInfo::builder();
-                gpu.create_semaphore(&desc, None)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
         let mut camera = Camera::new(vec3(0.0, 0.0, 0.0), 0.0, 0.0);
         let mut input = InputMap::new();
-
-        let mut frame_index = 0;
 
         event_loop.run(move |event, _, control_flow| {
             *control_flow = ControlFlow::Poll;
@@ -796,12 +785,10 @@ fn main() -> anyhow::Result<()> {
                     _ => (),
                 },
                 Event::MainEventsCleared => {
-                    let frame_local = frame_index % frames_in_flight;
-
                     camera.update(&input);
                     input.reset_delta();
 
-                    let image_index = wsi.acquire().unwrap();
+                    let frame = wsi.acquire().unwrap();
                     let pool = gpu.acquire_pool().unwrap();
 
                     let size = window.inner_size();
@@ -872,7 +859,7 @@ fn main() -> anyhow::Result<()> {
 
                     let mesh_pass_begin_desc = vk::RenderPassBeginInfo::builder()
                         .render_pass(mesh_pass)
-                        .framebuffer(mesh_fbos[frame_local])
+                        .framebuffer(mesh_fbos[frame.id])
                         .render_area(vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
                             extent: vk::Extent2D {
@@ -933,40 +920,18 @@ fn main() -> anyhow::Result<()> {
                     gpu.cmd_draw_indexed(pool.cmd_buffer, num_indices as _, 1, 0, 0, 0);
                     gpu.cmd_end_render_pass(pool.cmd_buffer);
 
-                    gpu.end_command_buffer(pool.cmd_buffer).unwrap();
+                    gpu.submit_pool(pool, gpu::Submit {
+                        waits: &[gpu::SemaphoreSubmit {
+                            semaphore: frame.acquire,
+                            stage: gpu::Stage::COLOR_ATTACHMENT_OUTPUT,
+                        }],
+                        signals: &[gpu::SemaphoreSubmit {
+                            semaphore: frame.present,
+                            stage: gpu::Stage::COLOR_ATTACHMENT_OUTPUT,
+                        }],
+                    }).unwrap();
 
-                    let main_waits = [wsi.frame_semaphores[image_index]];
-                    let main_signals = [gpu.timeline, render_semaphores[frame_local]];
-                    let main_stages = [vk::PipelineStageFlags::BOTTOM_OF_PIPE]; // TODO
-                    let main_buffers = [pool.cmd_buffer];
-
-                    let main_waits_values = [0];
-                    let main_signals_values = [frame_index as u64 + 1, 0];
-                    let mut timeline_submit = vk::TimelineSemaphoreSubmitInfo::builder()
-                        .wait_semaphore_values(&main_waits_values)
-                        .signal_semaphore_values(&main_signals_values);
-                    let main_submit = vk::SubmitInfo::builder()
-                        .wait_semaphores(&main_waits)
-                        .wait_dst_stage_mask(&main_stages)
-                        .signal_semaphores(&main_signals)
-                        .command_buffers(&main_buffers)
-                        .push_next(&mut timeline_submit)
-                        .build();
-                    gpu.queue_submit(gpu.queue, &[main_submit], vk::Fence::null())
-                        .unwrap();
-
-                    let present_wait = [render_semaphores[frame_local]];
-                    let present_swapchains = [wsi.swapchain];
-                    let present_images = [image_index as u32];
-                    let present_info = vk::PresentInfoKHR::builder()
-                        .wait_semaphores(&present_wait)
-                        .swapchains(&present_swapchains)
-                        .image_indices(&present_images);
-                    wsi.swapchain_fn
-                        .queue_present(gpu.queue, &present_info)
-                        .unwrap();
-
-                    frame_index += 1;
+                    wsi.present(&gpu, frame).unwrap();
                 }
                 _ => (),
             }

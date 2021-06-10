@@ -1,6 +1,13 @@
 use crate::gpu::{Gpu, Instance};
 use ash::{extensions::khr, prelude::*, vk};
 
+#[derive(Debug)]
+pub struct Frame {
+    pub id: usize,
+    pub acquire: vk::Semaphore,
+    pub present: vk::Semaphore,
+}
+
 pub struct Swapchain {
     device_id: usize,
     pub swapchain_fn: khr::Swapchain,
@@ -8,6 +15,7 @@ pub struct Swapchain {
     pub surface_format: vk::SurfaceFormatKHR,
     pub acquire_semaphore: vk::Semaphore,
     pub frame_semaphores: Vec<vk::Semaphore>,
+    pub present_semaphores: Vec<vk::Semaphore>,
     pub frame_rtvs: Vec<vk::ImageView>,
 }
 
@@ -70,6 +78,12 @@ impl Swapchain {
                 device.create_semaphore(&desc, None)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let present_semaphores = (0..frame_images.len())
+            .map(|_| {
+                let desc = vk::SemaphoreCreateInfo::builder();
+                device.create_semaphore(&desc, None)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let frame_rtvs = frame_images
             .iter()
@@ -103,11 +117,12 @@ impl Swapchain {
             surface_format,
             acquire_semaphore,
             frame_semaphores,
+            present_semaphores,
             frame_rtvs,
         })
     }
 
-    pub unsafe fn acquire(&mut self) -> VkResult<usize> {
+    pub unsafe fn acquire(&mut self) -> VkResult<Frame> {
         let mut index = 0;
         let desc = vk::AcquireNextImageInfoKHR::builder()
             .swapchain(self.swapchain)
@@ -126,11 +141,30 @@ impl Swapchain {
             _ => return VkResult::Err(result),
         };
 
+        let frame = Frame {
+            id: index,
+            acquire: self.acquire_semaphore,
+            present: self.present_semaphores[index],
+        };
+
         std::mem::swap(
             &mut self.frame_semaphores[index],
             &mut self.acquire_semaphore,
         );
 
-        VkResult::Ok(index)
+        VkResult::Ok(frame)
+    }
+
+    pub unsafe fn present(&mut self, gpu: &Gpu, frame: Frame) -> VkResult<()> {
+        let present_wait = [frame.present];
+        let present_swapchains = [self.swapchain];
+        let present_images = [frame.id as u32];
+        let present_info = vk::PresentInfoKHR::builder()
+            .wait_semaphores(&present_wait)
+            .swapchains(&present_swapchains)
+            .image_indices(&present_images);
+        self.swapchain_fn
+            .queue_present(gpu.queue, &present_info)?;
+        Ok(())
     }
 }

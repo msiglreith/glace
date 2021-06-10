@@ -11,6 +11,7 @@ pub use self::swapchain::Swapchain;
 pub use ash::vk::{
     AccelerationStructureKHR as AccelerationStructure, AccessFlags2KHR as Access, Buffer,
     BufferUsageFlags, Image, ImageLayout, ImageView, PipelineStageFlags2KHR as Stage,
+    Semaphore,
 };
 
 use ash::vk;
@@ -99,4 +100,16 @@ pub struct ImageBarrier {
     pub range: vk::ImageSubresourceRange,
     pub src: ImageAccess,
     pub dst: ImageAccess,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct SemaphoreSubmit {
+    pub semaphore: Semaphore,
+    pub stage: Stage,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct Submit<'a> {
+    pub waits: &'a [SemaphoreSubmit],
+    pub signals: &'a [SemaphoreSubmit],
 }
