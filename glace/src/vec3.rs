@@ -1,12 +1,14 @@
+use crate::{vec4, Vec4};
 use core::default::Default;
-use core::ops::{Add, BitXor, Mul, Shr, Sub};
+use core::ops::{Add, AddAssign, BitXor, Mul, Neg, Shr, Sub};
 use spirv_std::{scalar::Scalar, vector::Vector};
 
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
 
 #[derive(Debug, Copy, Clone)]
-#[cfg_attr(target_arch = "spirv", spirv(vector))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(target_arch = "spirv", repr(simd))]
 pub struct Vec3<T> {
     pub x: T,
     pub y: T,
@@ -27,6 +29,24 @@ impl<T: Scalar> Default for Vec3<T> {
 
 pub fn vec3<T>(x: T, y: T, z: T) -> Vec3<T> {
     Vec3 { x, y, z }
+}
+
+impl<T> Vec3<T> {
+    pub fn w(self, w: T) -> Vec4<T> {
+        vec4(self.x, self.y, self.z, w)
+    }
+}
+
+impl<T> From<[T; 3]> for Vec3<T> {
+    fn from([a0, a1, a2]: [T; 3]) -> Self {
+        vec3(a0, a1, a2)
+    }
+}
+
+impl<T: Copy> From<&'_ [T; 3]> for Vec3<T> {
+    fn from([a0, a1, a2]: &'_ [T; 3]) -> Self {
+        vec3(*a0, *a1, *a2)
+    }
 }
 
 impl Vec3<f32> {
@@ -59,8 +79,8 @@ impl Vec3<u32> {
             let mut result = Self::default();
             unsafe {
                 asm! {
-                    "%vec1 = OpLoad typeof*{1} {1}",
-                    "%vec2 = OpLoad typeof*{2} {2}",
+                    "%vec1 = OpLoad _ {1}",
+                    "%vec2 = OpLoad _ {2}",
                     "%result = OpIAdd typeof*{0} %vec1 %vec2",
                     "OpStore {0} %result",
                     in(reg) &mut result,
@@ -86,8 +106,8 @@ impl Vec3<u32> {
             let mut result = Self::default();
             unsafe {
                 asm! {
-                    "%vec1 = OpLoad typeof*{1} {1}",
-                    "%vec2 = OpLoad typeof*{2} {2}",
+                    "%vec1 = OpLoad _ {1}",
+                    "%vec2 = OpLoad _ {2}",
                     "%result = OpIMul typeof*{0} %vec1 %vec2",
                     "OpStore {0} %result",
                     in(reg) &mut result,
@@ -116,8 +136,8 @@ impl Shr for Vec3<u32> {
             let mut result = Self::default();
             unsafe {
                 asm! {
-                    "%vec = OpLoad typeof*{1} {1}",
-                    "%rhs = OpLoad typeof*{2} {2}",
+                    "%vec = OpLoad _ {1}",
+                    "%rhs = OpLoad _ {2}",
                     "%result = OpShiftRightLogical typeof*{0} %vec %rhs",
                     "OpStore {0} %result",
                     in(reg) &mut result,
@@ -146,8 +166,8 @@ impl BitXor for Vec3<u32> {
             let mut result = Self::default();
             unsafe {
                 asm! {
-                    "%vec1 = OpLoad typeof*{1} {1}",
-                    "%vec2 = OpLoad typeof*{2} {2}",
+                    "%vec1 = OpLoad _ {1}",
+                    "%vec2 = OpLoad _ {2}",
                     "%result = OpBitwiseXor typeof*{0} %vec1 %vec2",
                     "OpStore {0} %result",
                     in(reg) &mut result,
@@ -180,6 +200,25 @@ impl Add for Vec3<u32> {
     }
 }
 
+impl Add for Vec3<f32> {
+    type Output = Self;
+    #[inline]
+    fn add(self, other: Self) -> Self {
+        Vec3 {
+            x: self.x + other.x,
+            y: self.y + other.y,
+            z: self.z + other.z,
+        }
+    }
+}
+
+impl AddAssign for Vec3<f32> {
+    #[inline]
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
 impl Sub for Vec3<f32> {
     type Output = Self;
     #[inline]
@@ -201,9 +240,9 @@ impl Mul<u32> for Vec3<u32> {
             let mut result = Self::default();
             unsafe {
                 asm! {
-                    "%vec = OpLoad typeof*{1} {1}",
-                    "%scalar = OpLoad typeof*{2} {2}",
-                    "%result = OpVectorTimesScalar typeof*{0} %vec %scalar",
+                    "%vec = OpLoad _ {1}",
+                    "%scalar = OpLoad _ {2}",
+                    "%result = OpVectorTimesScalar _ %vec %scalar",
                     "OpStore {0} %result",
                     in(reg) &mut result,
                     in(reg) &self,
@@ -232,8 +271,8 @@ impl Mul<f32> for Vec3<f32> {
             let mut result = Self::default();
             unsafe {
                 asm! {
-                    "%vec = OpLoad typeof*{1} {1}",
-                    "%scalar = OpLoad typeof*{2} {2}",
+                    "%vec = OpLoad _ {1}",
+                    "%scalar = OpLoad _ {2}",
                     "%result = OpVectorTimesScalar typeof*{0} %vec %scalar",
                     "OpStore {0} %result",
                     in(reg) &mut result,
@@ -262,14 +301,25 @@ impl Mul<Vec3<f32>> for f32 {
     }
 }
 
-impl Add for Vec3<f32> {
+impl Mul for Vec3<f32> {
     type Output = Self;
     #[inline]
-    fn add(self, other: Self) -> Self {
+    fn mul(self, other: Self) -> Self {
+        Self {
+            x: self.x * other.x,
+            y: self.y * other.y,
+            z: self.z * other.z,
+        }
+    }
+}
+
+impl<T: Neg> Neg for Vec3<T> {
+    type Output = Vec3<T::Output>;
+    fn neg(self) -> Self::Output {
         Vec3 {
-            x: self.x + other.x,
-            y: self.y + other.y,
-            z: self.z + other.z,
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
         }
     }
 }

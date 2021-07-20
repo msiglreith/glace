@@ -14,7 +14,7 @@
 //!   issn =         {2331-7418}
 //! }
 
-use crate::u32x3;
+use crate::{u32x3, u32x4};
 
 pub fn pcg3d(mut v: u32x3) -> u32x3 {
     v = v
@@ -40,5 +40,37 @@ pub fn pcg3d(mut v: u32x3) -> u32x3 {
     v.x = v.x.wrapping_add(v.y.wrapping_mul(v.z));
     v.y = v.y.wrapping_add(v.z.wrapping_mul(v.x));
     v.z = v.z.wrapping_add(v.x.wrapping_mul(v.y));
+    v
+}
+
+pub fn pcg4d(mut v: u32x4) -> u32x4 {
+    v = v
+        .wrapping_mul(u32x4 {
+            x: 1664525u32,
+            y: 1664525u32,
+            z: 1664525u32,
+            w: 1664525u32,
+        })
+        .wrapping_add(u32x4 {
+            x: 1013904223u32,
+            y: 1013904223u32,
+            z: 1013904223u32,
+            w: 1013904223u32,
+        });
+    v.x = v.x.wrapping_add(v.y.wrapping_mul(v.w));
+    v.y = v.y.wrapping_add(v.z.wrapping_mul(v.x));
+    v.z = v.z.wrapping_add(v.x.wrapping_mul(v.y));
+    v.w = v.z.wrapping_add(v.y.wrapping_mul(v.z));
+    v = v
+        ^ (v >> u32x4 {
+            x: 16u32,
+            y: 16u32,
+            z: 16u32,
+            w: 16u32,
+        });
+    v.x = v.x.wrapping_add(v.y.wrapping_mul(v.w));
+    v.y = v.y.wrapping_add(v.z.wrapping_mul(v.x));
+    v.z = v.z.wrapping_add(v.x.wrapping_mul(v.y));
+    v.w = v.z.wrapping_add(v.y.wrapping_mul(v.z));
     v
 }

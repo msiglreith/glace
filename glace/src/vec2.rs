@@ -5,6 +5,7 @@ use core::{
 use spirv_std::{scalar::Scalar, vector::Vector};
 
 #[derive(Debug, Copy, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(target_arch = "spirv", repr(simd))]
 pub struct Vec2<T> {
     pub x: T,
@@ -24,6 +25,18 @@ impl<T: Scalar> Default for Vec2<T> {
 
 pub fn vec2<T>(x: T, y: T) -> Vec2<T> {
     Vec2 { x, y }
+}
+
+impl<T> From<[T; 2]> for Vec2<T> {
+    fn from([a0, a1]: [T; 2]) -> Self {
+        vec2(a0, a1)
+    }
+}
+
+impl<T: Copy> From<&'_ [T; 2]> for Vec2<T> {
+    fn from([a0, a1]: &'_ [T; 2]) -> Self {
+        vec2(*a0, *a1)
+    }
 }
 
 impl Vec2<f32> {
@@ -213,10 +226,40 @@ impl Mul<f32> for Vec2<f32> {
     }
 }
 
+impl Mul<u32> for Vec2<u32> {
+    type Output = Self;
+    #[inline]
+    fn mul(self, other: u32) -> Self {
+        Vec2 {
+            x: self.x * other,
+            y: self.y * other,
+        }
+    }
+}
+
+impl Div<u32> for Vec2<u32> {
+    type Output = Self;
+    #[inline]
+    fn div(self, other: u32) -> Self {
+        Vec2 {
+            x: self.x / other,
+            y: self.y / other,
+        }
+    }
+}
+
 impl Mul<Vec2<f32>> for f32 {
     type Output = Vec2<f32>;
     #[inline]
-    fn mul(self, other: Vec2<f32>) -> Vec2<f32> {
+    fn mul(self, other: Vec2<f32>) -> Self::Output {
+        other * self
+    }
+}
+
+impl Mul<Vec2<u32>> for u32 {
+    type Output = Vec2<u32>;
+    #[inline]
+    fn mul(self, other: Vec2<u32>) -> Self::Output {
         other * self
     }
 }

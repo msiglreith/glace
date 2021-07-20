@@ -9,5 +9,4 @@ crate-type = ["dylib"]
 
 [dependencies]
 glace = { path = "../../glace" }
-spirv-std = { path = "../../../rust-gpu/crates/spirv-std", features = ["const-generics"] }
-spirv-std-macros = "0.4.0-alpha.7"
+spirv-std-macros = "0.4.0-alpha.12"

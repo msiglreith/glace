@@ -16,6 +16,7 @@ pub struct Swapchain {
     pub acquire_semaphore: vk::Semaphore,
     pub frame_semaphores: Vec<vk::Semaphore>,
     pub present_semaphores: Vec<vk::Semaphore>,
+    pub frame_images: Vec<vk::Image>,
     pub frame_rtvs: Vec<vk::ImageView>,
 }
 
@@ -25,6 +26,7 @@ impl Swapchain {
         device: &Gpu,
         width: u32,
         height: u32,
+        present_mode: vk::PresentModeKHR,
     ) -> anyhow::Result<Self> {
         let swapchain_fn = khr::Swapchain::new(&instance.instance, &device.device);
         let (swapchain, surface_format) = {
@@ -60,11 +62,13 @@ impl Swapchain {
                     height: height,
                 })
                 .image_array_layers(1)
-                .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                .image_usage(
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST,
+                )
                 .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .pre_transform(surface_capabilities.current_transform)
                 .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-                .present_mode(vk::PresentModeKHR::FIFO)
+                .present_mode(present_mode)
                 .clipped(true);
             let swapchain = swapchain_fn.create_swapchain(&swapchain_desc, None)?;
 
@@ -118,6 +122,7 @@ impl Swapchain {
             acquire_semaphore,
             frame_semaphores,
             present_semaphores,
+            frame_images,
             frame_rtvs,
         })
     }
@@ -163,8 +168,7 @@ impl Swapchain {
             .wait_semaphores(&present_wait)
             .swapchains(&present_swapchains)
             .image_indices(&present_images);
-        self.swapchain_fn
-            .queue_present(gpu.queue, &present_info)?;
+        self.swapchain_fn.queue_present(gpu.queue, &present_info)?;
         Ok(())
     }
 }

@@ -1,0 +1,26 @@
+[package]
+name = "glacier"
+version = "0.1.0"
+authors = ["msiglreith <m.siglreith@gmail.com>"]
+edition = "2018"
+workspace = ".."
+
+[features]
+default = []
+nsight = []
+
+[dependencies]
+ash = "0.33"
+ash-window = "0.7"
+winit = "0.24"
+byteorder = "1"
+anyhow = "1"
+gpu-allocator = { git = "https://github.com/Traverse-Research/gpu-allocator.git" }
+glace = { path = "../glace", features = ["serde"] }
+image = "0.23"
+gltf = "0.16"
+dolly = "0.1"
+
+[build-dependencies]
+spirv-builder = { git = "https://github.com/msiglreith/rust-gpu", branch = "glace" } # { path = "../../rust-gpu/crates/spirv-builder" }
+anyhow = "1"

@@ -1,4 +1,4 @@
-use crate::{f32x2, Gl};
+use crate::{f32::clamp, f32x2};
 
 /// Signed distance from a point.
 pub trait Sdf2d {
@@ -20,6 +20,6 @@ impl Sdf2d for f32x2 {
 
         // project a-p onto a-b
         let t = a2p.dot(a2b) / a2b.dot(a2b);
-        (a2p - a2b * Gl::clamp(t, 0.0, 1.0)).length()
+        (a2p - a2b * clamp(t, 0.0, 1.0)).length()
     }
 }
