@@ -292,7 +292,7 @@ pub unsafe fn pathtrace(
                     Lambert { albedo }
                 };
 
-                // next event estimation for global direction light
+                // next event estimation for global directional light
                 let shadow_ray = Ray {
                     origin: position_world,
                     direction: vec3(-0.3, 1.0, 1.0).normalize(),
@@ -311,7 +311,7 @@ pub unsafe fn pathtrace(
 
                 if shadow.get_committed_intersection_type() != CommittedIntersection::Triangle {
                     let n_dot_l = shadow_ray.direction.dot(normal_world);
-                    // radiance += attenuation * brdf.eval() * n_dot_l;
+                    radiance += attenuation * brdf.eval() * n_dot_l;
                 }
 
                 // indirect light.
