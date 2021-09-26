@@ -586,7 +586,7 @@ name = "glace-dis"
 version = "0.1.0"
 dependencies = [
  "ash",
- "spirv-tools 0.6.1",
+ "spirv-tools",
  "structopt",
 ]
 
@@ -1363,7 +1363,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "spirv-tools 0.6.1 (git+https://github.com/msiglreith/spirv-tools-rs.git?branch=nv_bindless_texture)",
+ "spirv-tools",
  "syn",
  "topological-sort",
 ]
@@ -1551,23 +1551,9 @@ dependencies = [
 [[package]]
 name = "spirv-tools"
 version = "0.6.1"
-dependencies = [
- "spirv-tools-sys 0.4.1",
-]
-
-[[package]]
-name = "spirv-tools"
-version = "0.6.1"
 source = "git+https://github.com/msiglreith/spirv-tools-rs.git?branch=nv_bindless_texture#fc742f9bd4ff4ac418f30d4182ce420a63763de3"
 dependencies = [
- "spirv-tools-sys 0.4.1 (git+https://github.com/msiglreith/spirv-tools-rs.git?branch=nv_bindless_texture)",
-]
-
-[[package]]
-name = "spirv-tools-sys"
-version = "0.4.1"
-dependencies = [
- "cc",
+ "spirv-tools-sys",
 ]
 
 [[package]]
